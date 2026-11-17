@@ -1,0 +1,91 @@
+{
+  "expo": {
+    "name": "coptic ⲭⲏⲙⲓ",
+    "slug": "coptic-dictionary",
+    "version": "1.2.1",
+    "orientation": "portrait",
+    "icon": "./assets/images/icon.png",
+    "scheme": "coptic-dictionary",
+    "userInterfaceStyle": "automatic",
+    "newArchEnabled": true,
+    "splash": {
+      "image": "./assets/images/splash-icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#070202"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.khmi.copticdictionary",
+      "infoPlist": {
+        "UIBackgroundModes": ["fetch"]
+      }
+    },
+    "android": {
+      "backgroundColor": "#8B0000",
+      "package": "com.khmi.copticdictionary",
+      "softwareKeyboardLayoutMode": "resize",
+      "versionCode": 25,
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/images/icon.png",
+        "backgroundColor": "#8B0000"
+      },
+      "permissions": [
+        "android.permission.INTERNET",
+        "android.permission.VIBRATE",
+        "android.permission.RECEIVE_BOOT_COMPLETED",
+        "android.permission.WAKE_LOCK",
+        "android.permission.ACCESS_NETWORK_STATE",
+        "android.permission.SCHEDULE_EXACT_ALARM",
+        "android.permission.USE_EXACT_ALARM"
+      ],
+      "googleServicesFile": "./google-services.json"
+    },
+    "web": {
+      "favicon": "./assets/images/icon.png"
+    },
+    "plugins": [
+      "expo-sqlite",
+      "expo-dev-client",
+      "expo-background-fetch",
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/images/icon.png",
+          "color": "#8B0000",
+          "sounds": [
+            "./assets/sounds/notification.wav"
+          ]
+        }
+      ],
+      [
+        "expo-router",
+        {
+          "origin": "https://replit.com/"
+        }
+      ],
+      "expo-font",
+      "expo-web-browser",
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "enableProguardInReleaseBuilds": true,
+            "enableShrinkResources": true,
+            "minSdkVersion": 24
+          }
+        }
+      ],
+      "./plugins/withAbiFilters"
+    ],
+    "experiments": {
+      "typedRoutes": true,
+      "reactCompiler": false
+    },
+    "extra": {
+      "eas": {
+        "projectId": "64d3c225-d01b-4de7-b62d-a3cca1f465e8"
+      }
+    },
+    "owner": "ebramel-masry"
+  }
+}
