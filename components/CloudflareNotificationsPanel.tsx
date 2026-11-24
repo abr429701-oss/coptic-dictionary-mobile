@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
+  Image,
   Modal,
   Pressable,
   ScrollView,
@@ -12,18 +13,16 @@ import {
   View,
 } from "react-native";
 import { Feather } from "@expo/vector-icons";
+import * as DocumentPicker from "expo-document-picker";
+import * as ImageManipulator from "expo-image-manipulator";
+import { CLOUDFLARE_API_BASE, type CloudflareAdminSession } from "@/lib/cloudflare";
+import { LocalNotificationTestPanel } from "@/components/LocalNotificationTestPanel";
 
-const CLOUDFLARE_API_BASE = "https://coptic-app-notifications.abraammerzik56.workers.dev";
 const GOLD = "#C8A951";
 const MUTED = "#94A3B8";
 const MAX_DEVICE_KEYS = 200;
 
 type Language = "all" | "ar" | "en" | "fr" | "de";
-
-export interface CloudflareAdminSession {
-  token: string;
-  expiresAt: number;
-}
 
 interface CloudflareDevice {
   deviceKey: string;
@@ -32,6 +31,12 @@ interface CloudflareDevice {
   language: string;
   platform: string;
   lastSeenAt: string;
+}
+
+interface SelectedNotificationImage {
+  uri: string;
+  name: string;
+  size?: number;
 }
 
 interface Props {
@@ -145,8 +150,16 @@ async function readResponse(response: Response): Promise<Record<string, any>> {
 export function CloudflareNotificationsPanel({ session, onSessionChange }: Props) {
   const [passphrase, setPassphrase] = useState("");
   const [authBusy, setAuthBusy] = useState(false);
+  const [sheetUrl, setSheetUrl] = useState("https://docs.google.com/spreadsheets/d/1kZKjF2KDsGT0HslGSenN-pDTzx4FpX0QDPqX0ZOnriY/edit?gid=425952754#gid=425952754");
+  const [sheetColumn, setSheetColumn] = useState("C");
+  const [sheetImportBusy, setSheetImportBusy] = useState(false);
+  const [sheetPreview, setSheetPreview] = useState<{ validUnique: number; invalid: number; duplicates: number } | null>(null);
   const [title, setTitle] = useState("");
   const [body, setBody] = useState("");
+  const [imageMode, setImageMode] = useState<"none" | "upload" | "url">("none");
+  const [imageUrl, setImageUrl] = useState("");
+  const [selectedImage, setSelectedImage] = useState<SelectedNotificationImage | null>(null);
+  const [pickingImage, setPickingImage] = useState(false);
   const [language, setLanguage] = useState<Language>("all");
   const [appVersion, setAppVersion] = useState("");
   const [scheduleMode, setScheduleMode] = useState<"now" | "scheduled">("now");
@@ -242,6 +255,60 @@ export function CloudflareNotificationsPanel({ session, onSessionChange }: Props
     return response;
   };
 
+  const previewSheetImport = async () => {
+    setSheetImportBusy(true);
+    setSheetPreview(null);
+    try {
+      const response = await authenticatedFetch("/admin/import-google-sheet-tokens", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sheetUrl: sheetUrl.trim(), column: sheetColumn.trim(), preview: true }),
+      });
+      const data = await readResponse(response);
+      if (!response.ok || data.success !== true) {
+        const error = String(data.error || "");
+        const messages: Record<string, string> = {
+          google_sheet_not_public_or_unavailable: "تعذر قراءة الشيت. اجعله متاحًا للقراءة عبر الرابط ثم أعد المحاولة.",
+          google_sheet_not_public_or_invalid_csv: "لم يرجع Google بيانات CSV صالحة. تحقق من رابط الشيت والورقة.",
+          invalid_google_sheet_url: "رابط Google Sheets غير صالح.",
+          invalid_google_sheet_url_or_column: "تحقق من الرابط ورمز الورقة (gid) وحرف العمود.",
+        };
+        throw new Error(messages[error] || error || "تعذرت معاينة الشيت.");
+      }
+      setSheetPreview({ validUnique: Number(data.validUnique || 0), invalid: Number(data.invalid || 0), duplicates: Number(data.duplicates || 0) });
+    } catch (error) {
+      Alert.alert("معاينة الاستيراد", error instanceof Error ? error.message : "تعذر الاتصال بـCloudflare.");
+    } finally {
+      setSheetImportBusy(false);
+    }
+  };
+
+  const commitSheetImport = async () => {
+    if (!sheetPreview || sheetPreview.validUnique < 1) return;
+    Alert.alert("تأكيد استيراد التوكنات", `سيتم إضافة ${sheetPreview.validUnique} توكن صالح وفريد من العمود ${sheetColumn.toUpperCase()}. لن يتم تعطيل أو حذف أي سجل موجود.`, [
+      { text: "إلغاء", style: "cancel" },
+      { text: "استيراد", onPress: () => { void (async () => {
+        setSheetImportBusy(true);
+        try {
+          const response = await authenticatedFetch("/admin/import-google-sheet-tokens", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ sheetUrl: sheetUrl.trim(), column: sheetColumn.trim(), confirmImport: true, expectedValidUnique: sheetPreview.validUnique }),
+          });
+          const data = await readResponse(response);
+          if (!response.ok || data.success !== true) throw new Error(data.error === "sheet_changed_after_preview" ? `تغيّر الشيت بعد المعاينة. أصبح عدد التوكنات الصالحة ${data.validUnique || 0}. أعد المعاينة قبل التأكيد.` : String(data.error || "فشل استيراد التوكنات."));
+          Alert.alert("اكتمل الاستيراد", `أُضيف/أُعيد تفعيل ${data.addedOrReactivated || 0} · موجود مسبقًا ${data.alreadyPresent || 0} · مكرر ${data.duplicates || 0} · غير صالح/فارغ ${data.invalid || 0}`);
+          setSheetPreview(null);
+          void loadDevices();
+        } catch (error) {
+          Alert.alert("تعذر استيراد التوكنات", error instanceof Error ? error.message : "تحقق من الاتصال.");
+        } finally {
+          setSheetImportBusy(false);
+        }
+      })(); } },
+    ]);
+  };
+
   const loadDevices = async () => {
     setDevicesBusy(true);
     try {
@@ -290,9 +357,57 @@ export function CloudflareNotificationsPanel({ session, onSessionChange }: Props
     });
   };
 
+  const pickImage = async () => {
+    setPickingImage(true);
+    try {
+      const picked = await DocumentPicker.getDocumentAsync({ type: "image/*", copyToCacheDirectory: true, multiple: false });
+      if (picked.canceled || !picked.assets?.[0]?.uri) return;
+      const asset = picked.assets[0];
+      const compressed = await ImageManipulator.manipulateAsync(
+        asset.uri,
+        [{ resize: { width: 1600 } }],
+        { compress: 0.82, format: ImageManipulator.SaveFormat.JPEG }
+      );
+      setSelectedImage({ uri: compressed.uri, name: `notification-${Date.now()}.jpg` });
+      setImageUrl("");
+      setImageMode("upload");
+    } catch (error) {
+      Alert.alert("تعذر اختيار الصورة", error instanceof Error ? error.message : "اختر صورة بصيغة مدعومة ثم حاول مجددًا.");
+    } finally {
+      setPickingImage(false);
+    }
+  };
+
+  const uploadSelectedImage = async (image: SelectedNotificationImage) => {
+    const form = new FormData();
+    form.append("file", { uri: image.uri, name: image.name, type: "image/jpeg" } as any);
+    const response = await authenticatedFetch("/admin/media", { method: "POST", body: form });
+    const data = await readResponse(response);
+    const uploadedUrl = String(data.imageUrl || "");
+    if (!response.ok || data.success !== true || !uploadedUrl) {
+      const serverError = String(data.error || "");
+      const messages: Record<string, string> = {
+        r2_media_binding_not_configured: "تخزين الصور غير مفعّل على Cloudflare بعد.",
+        image_too_large_max_5mb: "حجم الصورة بعد الضغط أكبر من 5 ميغابايت.",
+        unsupported_or_invalid_image_type: "صيغة الصورة غير مدعومة. استخدم JPEG أو PNG أو WebP.",
+        invalid_multipart_upload: "تعذر قراءة ملف الصورة. أعد اختياره وحاول مجددًا.",
+      };
+      throw new Error(messages[serverError] || serverError || "تعذر رفع الصورة إلى Cloudflare.");
+    }
+    return uploadedUrl;
+  };
+
   const submitSend = async (scheduledAt: Date | null, deviceKeys: string[]) => {
     setSendBusy(true);
     try {
+      let finalImageUrl = "";
+      if (imageMode === "url") finalImageUrl = imageUrl.trim();
+      if (imageMode === "upload") {
+        finalImageUrl = selectedImage ? await uploadSelectedImage(selectedImage) : imageUrl.trim();
+        if (!finalImageUrl) throw new Error("اختر صورة من الجهاز أولًا.");
+        setImageUrl(finalImageUrl);
+        setSelectedImage(null);
+      }
       const targetFilter: Record<string, unknown> = { language };
       if (appVersion.trim()) targetFilter.appVersion = appVersion.trim();
       if (deviceKeys.length) targetFilter.deviceKeys = deviceKeys;
@@ -303,17 +418,24 @@ export function CloudflareNotificationsPanel({ session, onSessionChange }: Props
           title: title.trim(),
           body: body.trim(),
           language,
+          ...(finalImageUrl ? { imageUrl: finalImageUrl } : {}),
           targetFilter,
           ...(scheduledAt ? { scheduledAt: scheduledAt.toISOString() } : {}),
         }),
       });
       const data = await readResponse(response);
       if (!response.ok || data.success === false || data.ok === false) {
-        throw new Error(String(data.error ?? data.message ?? "فشل إرسال الإشعار."));
+        const errorCode = String(data.error ?? data.message ?? "");
+        throw new Error(errorCode === "notification_payload_too_large_with_image"
+          ? "نص الإشعار طويل جدًا لإرفاق صورة. اختصر النص ثم حاول مجددًا."
+          : errorCode || "فشل إرسال الإشعار.");
       }
       const count = Number(data.count ?? data.totalTargets ?? data.total_targets ?? data.targets ?? 0);
       setTitle("");
       setBody("");
+      setImageMode("none");
+      setImageUrl("");
+      setSelectedImage(null);
       setScheduleMode("now");
       Alert.alert(
         scheduledAt ? "تمت الجدولة" : "تم الإرسال",
@@ -331,6 +453,18 @@ export function CloudflareNotificationsPanel({ session, onSessionChange }: Props
   const confirmSend = () => {
     if (!title.trim() || !body.trim()) {
       Alert.alert("بيانات ناقصة", "أدخل عنوان الإشعار ونصه.");
+      return;
+    }
+    if (imageMode === "url") {
+      try {
+        if (new URL(imageUrl.trim()).protocol !== "https:") throw new Error();
+      } catch {
+        Alert.alert("رابط غير صالح", "أدخل رابط صورة مباشرًا يبدأ بـ https://.");
+        return;
+      }
+    }
+    if (imageMode === "upload" && !selectedImage && !imageUrl.trim()) {
+      Alert.alert("لم تُختر صورة", "اختر صورة من الجهاز أو عطّل خيار الصورة.");
       return;
     }
     const [year, month, day] = scheduleDate.split("-").map(Number);
@@ -407,10 +541,62 @@ export function CloudflareNotificationsPanel({ session, onSessionChange }: Props
         </View>
         <Text style={styles.help}>الجلسة تنتهي تلقائيًا بعد 8 ساعات. نظام Google Sheets يعمل بشكل مستقل ولم يتغير.</Text>
 
+        <LocalNotificationTestPanel />
+
+        <View style={styles.importCard}>
+          <Text style={styles.cardTitle}>استيراد توكنات من Google Sheets</Text>
+          <Text style={styles.smallHelp}>يقرأ الرابط العام المحدد من الخادم. أدخل رابط الورقة مع gid، وحرف العمود الذي يحتوي Expo Push Tokens. المعاينة لا تغيّر قاعدة البيانات؛ الاستيراد لا يعطّل السجلات الموجودة.</Text>
+          <Text style={styles.label}>رابط الشيت</Text>
+          <TextInput style={styles.input} value={sheetUrl} onChangeText={(value) => { setSheetUrl(value); setSheetPreview(null); }} placeholder="https://docs.google.com/spreadsheets/d/.../edit?gid=..." placeholderTextColor="#64748B" autoCapitalize="none" autoCorrect={false} keyboardType="url" />
+          <Text style={styles.label}>عمود التوكنات</Text>
+          <TextInput style={styles.input} value={sheetColumn} onChangeText={(value) => { setSheetColumn(value.toUpperCase()); setSheetPreview(null); }} placeholder="C" placeholderTextColor="#64748B" autoCapitalize="characters" autoCorrect={false} maxLength={3} />
+          <TouchableOpacity style={[styles.loadButton, { justifyContent: "center", minHeight: 42 }, (sheetImportBusy || !session) && styles.disabled]} onPress={() => void previewSheetImport()} disabled={sheetImportBusy || !session}>
+            {sheetImportBusy ? <ActivityIndicator size="small" color={GOLD} /> : <Feather name="search" size={15} color={GOLD} />}
+            <Text style={styles.loadText}>{sheetImportBusy ? "جارٍ فحص الشيت…" : "معاينة التوكنات"}</Text>
+          </TouchableOpacity>
+          {sheetPreview && <>
+            <Text style={styles.smallHelp}>صالح وفريد: {sheetPreview.validUnique} · مكرر: {sheetPreview.duplicates} · فارغ أو غير صالح: {sheetPreview.invalid}</Text>
+            <TouchableOpacity style={[styles.primaryButton, (sheetImportBusy || sheetPreview.validUnique < 1) && styles.disabled]} onPress={() => void commitSheetImport()} disabled={sheetImportBusy || sheetPreview.validUnique < 1}>
+              {sheetImportBusy ? <ActivityIndicator color="#0F172A" /> : <Feather name="download-cloud" size={17} color="#0F172A" />}
+              <Text style={styles.primaryButtonText}>{sheetImportBusy ? "جارٍ الاستيراد…" : `استيراد ${sheetPreview.validUnique} توكن`}</Text>
+            </TouchableOpacity>
+          </>}
+        </View>
+
         <Text style={styles.label}>عنوان الإشعار</Text>
         <TextInput style={styles.input} placeholder="عنوان قصير" placeholderTextColor="#64748B" value={title} onChangeText={setTitle} maxLength={120} />
         <Text style={styles.label}>نص الإشعار</Text>
         <TextInput style={[styles.input, styles.multiline]} placeholder="اكتب نص الإشعار" placeholderTextColor="#64748B" value={body} onChangeText={setBody} multiline maxLength={2000} />
+
+        <Text style={styles.label}>صورة للإشعار (اختياري)</Text>
+        <View style={styles.chipRow}>
+          <TouchableOpacity onPress={() => { setImageMode("none"); setImageUrl(""); setSelectedImage(null); }} style={[styles.chip, imageMode === "none" && styles.chipActive]}>
+            <Text style={[styles.chipText, imageMode === "none" && styles.chipTextActive]}>بدون صورة</Text>
+          </TouchableOpacity>
+          <TouchableOpacity onPress={() => { setImageMode("upload"); setImageUrl(""); }} style={[styles.chip, imageMode === "upload" && styles.chipActive]}>
+            <Text style={[styles.chipText, imageMode === "upload" && styles.chipTextActive]}>رفع من الجهاز</Text>
+          </TouchableOpacity>
+          <TouchableOpacity onPress={() => { setImageMode("url"); setSelectedImage(null); setImageUrl(""); }} style={[styles.chip, imageMode === "url" && styles.chipActive]}>
+            <Text style={[styles.chipText, imageMode === "url" && styles.chipTextActive]}>رابط صورة</Text>
+          </TouchableOpacity>
+        </View>
+        {imageMode === "upload" && (
+          <>
+            <TouchableOpacity style={[styles.loadButton, pickingImage && styles.disabled]} onPress={() => void pickImage()} disabled={pickingImage}>
+              {pickingImage ? <ActivityIndicator size="small" color={GOLD} /> : <Feather name="image" size={15} color={GOLD} />}
+              <Text style={styles.loadText}>{pickingImage ? "جارٍ تجهيز الصورة…" : selectedImage ? "اختيار صورة أخرى" : "اختيار صورة من الجهاز"}</Text>
+            </TouchableOpacity>
+            {selectedImage ? <Image source={{ uri: selectedImage.uri }} style={styles.imagePreview} resizeMode="cover" /> : imageUrl ? <Image source={{ uri: imageUrl }} style={styles.imagePreview} resizeMode="cover" /> : null}
+            <Text style={styles.smallHelp}>تُضغط الصورة تلقائيًا إلى JPEG قبل الرفع. الحد الأقصى للملف 5 ميغابايت.</Text>
+          </>
+        )}
+        {imageMode === "url" && (
+          <>
+            <TextInput style={styles.input} placeholder="https://example.com/image.jpg" placeholderTextColor="#64748B" value={imageUrl} onChangeText={setImageUrl} autoCapitalize="none" autoCorrect={false} keyboardType="url" maxLength={2048} />
+            {imageUrl.trim().startsWith("https://") ? <Image source={{ uri: imageUrl.trim() }} style={styles.imagePreview} resizeMode="cover" /> : null}
+            <Text style={styles.smallHelp}>استخدم رابط صورة مباشرًا وآمنًا يبدأ بـ https://، وستظهر معاينة قبل الإرسال.</Text>
+          </>
+        )}
 
         <Text style={styles.label}>اللغة</Text>
         <View style={styles.chipRow}>
@@ -503,6 +689,7 @@ export function CloudflareNotificationsPanel({ session, onSessionChange }: Props
 const styles = StyleSheet.create({
   panel: { gap: 14 },
   card: { padding: 20, borderRadius: 24, backgroundColor: "#1E293B", borderWidth: 1, borderColor: "rgba(255,255,255,0.06)", gap: 12 },
+  importCard: { padding: 14, borderRadius: 16, backgroundColor: "#0F172A", borderWidth: 1, borderColor: "rgba(200,169,81,0.25)", gap: 8 },
   titleRow: { flexDirection: "row", alignItems: "center", gap: 9 },
   headerRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 10 },
   cardTitle: { color: "#FFF", fontSize: 17, fontFamily: "Cairo_700Bold", textAlign: "right" },
@@ -512,6 +699,7 @@ const styles = StyleSheet.create({
   input: { minHeight: 48, backgroundColor: "#0F172A", borderRadius: 13, paddingHorizontal: 13, paddingVertical: 11, color: "#FFF", borderWidth: 1, borderColor: "#334155", fontSize: 13, fontFamily: "Cairo_400Regular", textAlign: "right" },
   multiline: { minHeight: 90, textAlignVertical: "top" },
   multilineSmall: { minHeight: 64, textAlignVertical: "top" },
+  imagePreview: { width: "100%", height: 190, borderRadius: 15, backgroundColor: "#0F172A", marginTop: 6 },
   primaryButton: { minHeight: 50, borderRadius: 14, backgroundColor: GOLD, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 9, marginTop: 4 },
   primaryButtonText: { color: "#0F172A", fontSize: 14, fontFamily: "Cairo_700Bold" },
   disabled: { opacity: 0.55 },

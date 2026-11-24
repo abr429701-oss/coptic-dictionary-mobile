@@ -77,6 +77,8 @@ assets/bible/*.pdf
 assets/bible/*.zip
 assets/bible/*.html
 assets/bible/*.txt
+# Generated full dictionary seed; runtime fetches it and stores it locally instead.
+assets/dictionary.seed.json
 assets/bible/scratch/
 assets/bible/comparisons/
 

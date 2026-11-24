@@ -1,5 +1,4 @@
 import { useQuery } from "@tanstack/react-query";
-import bundledRowsJson from "../assets/dictionary.seed.json";
 import bundledMetaJson from "../assets/dictionary.seed.meta.json";
 
 export interface DictionaryEntry {
@@ -18,12 +17,31 @@ export interface DictionaryEntry {
   arabicMeanings: string[];
 }
 
-const SHEET_ID = "14pUNXtrHoMSU9lBWhKQZyspe-DDTMDudSiuL2sJQRUI";
-const SHEET_NAME = "dictionary";
+const DEFAULT_DICTIONARY_SOURCE: DictionarySourceConfig = {
+  spreadsheet: "14pUNXtrHoMSU9lBWhKQZyspe-DDTMDudSiuL2sJQRUI",
+  sheetName: "dictionary",
+  columns: { coptic: "A", arabic: "C", english: "D", french: "E", german: "F", origin: "J", wordType: "K", audio: "L", gender: "" },
+};
+export interface DictionarySourceConfig {
+  spreadsheet: string;
+  sheetName: string;
+  columns: { coptic: string; arabic: string; english: string; french: string; german: string; origin: string; wordType: string; audio: string; gender: string };
+}
 const SYNC_TIMEOUT_MS = 45_000;
-const SHEET_QUERY = "select A,C,D,E,F,J,K,L";
-const GITHUB_AUDIO_BASE =
+export const GITHUB_AUDIO_BASE =
   "https://raw.githubusercontent.com/abr429701-oss/coptic-dictionary-bot/audio/";
+
+/** Returns the decoded path for audio files hosted by the bulk-download branch. */
+export function getGithubAudioArchivePath(audioUrl: string): string | null {
+  if (!audioUrl.startsWith(GITHUB_AUDIO_BASE)) return null;
+  const encodedPath = audioUrl.slice(GITHUB_AUDIO_BASE.length).split(/[?#]/, 1)[0];
+  if (!encodedPath) return null;
+  try {
+    return decodeURIComponent(encodedPath);
+  } catch {
+    return null;
+  }
+}
 
 const bundledMeta = bundledMetaJson as {
   entryCount?: number;
@@ -105,6 +123,7 @@ function parseDictionaryRowsChunk(
     const origin = value(6);
     const wordType = value(7);
     const audioUrl = normalizeAudioUrl(value(8));
+    const gender = value(9);
 
     const identity = `${coptic}\u0000${arabic}\u0000${audioUrl ?? ""}`;
     const occurrence = occurrences.get(identity) ?? 0;
@@ -119,6 +138,7 @@ function parseDictionaryRowsChunk(
       german: german || undefined,
       origin: origin || undefined,
       wordType: wordType || undefined,
+      gender: gender || undefined,
       audioUrl,
       audioId: audioUrl ? `audio-${hashId(audioUrl)}` : undefined,
       rawText: [coptic, arabic].filter(Boolean).join(". "),
@@ -132,15 +152,6 @@ function parseDictionaryRowsChunk(
 export function parseDictionaryRows(rows: unknown[][]): DictionaryEntry[] {
   return parseDictionaryRowsChunk(rows, new Map<string, number>());
 }
-
-const bundledRows = bundledRowsJson as unknown as unknown[][];
-export const BUNDLED_DICTIONARY_SEED = parseDictionaryRows(bundledRows);
-export const BUNDLED_AUDIO_ID_SET = new Set(
-  BUNDLED_DICTIONARY_SEED.filter((entry) => !!entry.audioUrl).map((entry) => entry.audioId || entry.id)
-);
-export const BUNDLED_AUDIO_URL_SET = new Set(
-  BUNDLED_DICTIONARY_SEED.map((entry) => entry.audioUrl).filter((url): url is string => !!url)
-);
 
 export interface AudioLibrarySize {
   bytes: number;
@@ -203,31 +214,23 @@ async function getRemoteAudioSize(url: string): Promise<number | null> {
  */
 export async function calculateAudioLibrarySize(entries: DictionaryEntry[]): Promise<AudioLibrarySize> {
   const estimatedBytes = estimateAudioLibrarySize(entries);
-  if (!AUDIO_SIZE_IS_KNOWN) return { bytes: estimatedBytes, known: false };
   const currentUrls = new Set(entries.map((entry) => entry.audioUrl).filter((url): url is string => !!url));
-  const added = [...currentUrls].filter((url) => !BUNDLED_AUDIO_URL_SET.has(url));
-  const removed = [...BUNDLED_AUDIO_URL_SET].filter((url) => !currentUrls.has(url));
-  if (added.length === 0 && removed.length === 0) {
-    return { bytes: AUDIO_TOTAL_SIZE_BYTES, known: true };
-  }
-  const changedUrls = [...added, ...removed];
-  if (changedUrls.length > 100) return { bytes: estimatedBytes, known: false };
-  const sizes: Array<number | null> = new Array(changedUrls.length).fill(null);
+  if (currentUrls.size === 0) return { bytes: 0, known: false };
+  if (!AUDIO_SIZE_IS_KNOWN || currentUrls.size > 100) return { bytes: estimatedBytes, known: false };
+
+  const urls = [...currentUrls];
+  const sizes: Array<number | null> = new Array(urls.length).fill(null);
   let nextIndex = 0;
   const worker = async () => {
     while (true) {
       const index = nextIndex++;
-      if (index >= changedUrls.length) return;
-      sizes[index] = await getRemoteAudioSize(changedUrls[index]);
+      if (index >= urls.length) return;
+      sizes[index] = await getRemoteAudioSize(urls[index]);
     }
   };
-  await Promise.all(Array.from({ length: Math.min(8, changedUrls.length) }, worker));
+  await Promise.all(Array.from({ length: Math.min(8, urls.length) }, worker));
   if (sizes.some((size) => size === null)) return { bytes: estimatedBytes, known: false };
-  const sizeByUrl = new Map(changedUrls.map((url, index) => [url, sizes[index] as number]));
-  const bytes = AUDIO_TOTAL_SIZE_BYTES +
-    added.reduce((sum, url) => sum + (sizeByUrl.get(url) ?? 0), 0) -
-    removed.reduce((sum, url) => sum + (sizeByUrl.get(url) ?? 0), 0);
-  return { bytes: Math.max(0, bytes), known: true };
+  return { bytes: sizes.reduce<number>((sum, size) => sum + (size ?? 0), 0), known: true };
 }
 
 function parseGvizResponse(text: string): unknown[] {
@@ -244,19 +247,24 @@ function parseGvizResponse(text: string): unknown[] {
   return rows;
 }
 
-async function parseGvizRowsInChunks(rows: unknown[], chunkSize = 400): Promise<DictionaryEntry[]> {
+async function parseGvizRowsInChunks(rows: unknown[], selectedColumns: string[], columns: DictionarySourceConfig["columns"], chunkSize = 400): Promise<DictionaryEntry[]> {
   const entries: DictionaryEntry[] = [];
   const occurrences = new Map<string, number>();
+  const positions = new Map(selectedColumns.map((column, index) => [column, index]));
+  const fieldOrder: Array<keyof DictionarySourceConfig["columns"]> = ["coptic", "arabic", "english", "french", "german", "origin", "wordType", "audio", "gender"];
   for (let offset = 0; offset < rows.length; offset += chunkSize) {
     const chunk = rows.slice(offset, offset + chunkSize).map((rowValue) => {
       const row = rowValue as { c?: Array<{ v?: unknown; f?: unknown } | null> };
       const cells = row?.c ?? [];
-      const selected = Array.from({ length: 8 }, (_, index) => {
-        const cell = cells[index];
+      const values = new Map<string, string>();
+      for (const field of fieldOrder) {
+        const column = columns[field].trim().toUpperCase();
+        const position = positions.get(column);
+        const cell = position === undefined ? null : cells[position];
         const value = cell?.v ?? cell?.f;
-        return value === null || value === undefined ? "" : String(value).trim();
-      });
-      return [...selected.slice(0, 5), "", ...selected.slice(5)];
+        values.set(field, value === null || value === undefined ? "" : String(value).trim());
+      }
+      return [values.get("coptic"), values.get("arabic"), values.get("english"), values.get("french"), values.get("german"), "", values.get("origin"), values.get("wordType"), values.get("audio"), values.get("gender")];
     });
     entries.push(...parseDictionaryRowsChunk(chunk, occurrences));
     // Yield to the UI between batches; the controlled search field and buttons remain responsive.
@@ -265,13 +273,37 @@ async function parseGvizRowsInChunks(rows: unknown[], chunkSize = 400): Promise<
   return entries;
 }
 
-/** جلب الأعمدة الضرورية فقط؛ بيانات JSON المحلي تظل ظاهرة أثناء هذا الطلب. */
-export async function fetchDictionaryData(): Promise<DictionaryEntry[]> {
+function spreadsheetIdFromSource(value: string): string {
+  const input = value.trim();
+  const match = input.match(/spreadsheets\/d\/([A-Za-z0-9_-]+)/);
+  const id = match?.[1] || input;
+  if (!/^[A-Za-z0-9_-]{10,}$/.test(id)) throw new Error("أدخل رابط Google Sheets صحيحًا أو معرّف الشيت.");
+  return id;
+}
+
+function normalizeSource(source?: DictionarySourceConfig): { spreadsheetId: string; sheetName: string; columns: DictionarySourceConfig["columns"]; selectedColumns: string[] } {
+  const supplied = source || DEFAULT_DICTIONARY_SOURCE;
+  const columns = { ...DEFAULT_DICTIONARY_SOURCE.columns, ...(supplied.columns || {}) };
+  for (const key of Object.keys(columns) as Array<keyof typeof columns>) {
+    columns[key] = String(columns[key] || "").trim().toUpperCase();
+    if (columns[key] && !/^[A-Z]{1,3}$/.test(columns[key])) throw new Error(`رقم/حرف عمود غير صالح: ${key}`);
+  }
+  if (!columns.coptic || !columns.arabic) throw new Error("يجب تحديد عمودي الكلمة القبطية والمعنى العربي على الأقل.");
+  const sheetName = String(supplied.sheetName || "").trim();
+  if (!sheetName) throw new Error("اسم ورقة القاموس مطلوب.");
+  const selectedColumns = [...new Set(Object.values(columns).filter(Boolean))];
+  return { spreadsheetId: spreadsheetIdFromSource(supplied.spreadsheet), sheetName, columns, selectedColumns };
+}
+
+/** جلب المصدر والأعمدة المعيّنة؛ البيانات المحلية تبقى ظاهرة عند فشل الشبكة. */
+export async function fetchDictionaryData(source?: DictionarySourceConfig, minimumEntries = 1_000): Promise<DictionaryEntry[]> {
+  const normalized = normalizeSource(source);
   const cacheBuster = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const query = `select ${normalized.selectedColumns.join(",")}`;
   const url =
-    `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq` +
-    `?tqx=out:json&sheet=${encodeURIComponent(SHEET_NAME)}` +
-    `&headers=1&tq=${encodeURIComponent(SHEET_QUERY)}&nocache=${cacheBuster}&_=${cacheBuster}`;
+    `https://docs.google.com/spreadsheets/d/${normalized.spreadsheetId}/gviz/tq` +
+    `?tqx=out:json&sheet=${encodeURIComponent(normalized.sheetName)}` +
+    `&headers=1&tq=${encodeURIComponent(query)}&nocache=${cacheBuster}&_=${cacheBuster}`;
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), SYNC_TIMEOUT_MS);
@@ -291,14 +323,14 @@ export async function fetchDictionaryData(): Promise<DictionaryEntry[]> {
     }
 
     const rows = parseGvizResponse(await response.text());
-    const entries = await parseGvizRowsInChunks(rows);
-    if (entries.length < 1_000) {
-      throw new Error(`استجابة الشيت غير مكتملة (${entries.length} كلمة)`);
+    const entries = await parseGvizRowsInChunks(rows, normalized.selectedColumns, normalized.columns);
+    if (entries.length < minimumEntries) {
+      throw new Error(`استجابة الشيت غير مكتملة (${entries.length} كلمة؛ الحد الأدنى ${minimumEntries})`);
     }
     return entries;
   } catch (error) {
     if (controller.signal.aborted) {
-      throw new Error("انتهت مهلة تحديث القاموس؛ ما زالت النسخة المحلية متاحة");
+      throw new Error("انتهت مهلة تحميل القاموس؛ حاول مرة أخرى عند توفر الإنترنت");
     }
     throw error;
   } finally {
@@ -306,11 +338,15 @@ export async function fetchDictionaryData(): Promise<DictionaryEntry[]> {
   }
 }
 
+export async function previewDictionarySource(source: DictionarySourceConfig): Promise<{ entryCount: number; sample: DictionaryEntry[] }> {
+  const entries = await fetchDictionaryData(source, 1);
+  return { entryCount: entries.length, sample: entries.slice(0, 5) };
+}
+
 export function useDictionary() {
   return useQuery<DictionaryEntry[]>({
     queryKey: ["dictionary_v4"],
-    queryFn: fetchDictionaryData,
-    initialData: BUNDLED_DICTIONARY_SEED,
+    queryFn: () => fetchDictionaryData(),
     staleTime: 5 * 60 * 1000,
     refetchInterval: 5 * 60 * 1000,
     refetchOnMount: false,

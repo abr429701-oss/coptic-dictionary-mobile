@@ -59,7 +59,7 @@ export function DrawerMenu({
   const { isDark, toggle: toggleDark } = useTheme();
   const colors = useThemeColors();
   const { t, setLang, lang, isRTL } = useLang();
-  const { config } = useAppConfig();
+  const { config, remoteSettings } = useAppConfig();
 
   const [mounted, setMounted] = useState(false);
   const translateX = useRef(new Animated.Value(-DRAWER_WIDTH)).current;
@@ -172,18 +172,33 @@ export function DrawerMenu({
 
   if (!mounted) return null;
 
+  const menuLabel = (key: keyof typeof remoteSettings.labels, fallback: string) => remoteSettings.labels[key]?.trim() || fallback;
   const MENU_ITEMS = [
-    { id: "home" as const, icon: "book-open", label: t.menu.home, count: 0 },
-    { id: "learn_coptic" as const, icon: "book", label: t.menu.learn_coptic, count: 0 },
-    { id: "coptic_bible" as const, icon: "bookmark", label: lang === "de" ? "Koptische Bibel" : (t.menu as any).coptic_bible || "الكتاب المقدس", count: 0 },
-    { id: "name_coptic" as const, icon: "edit-3", label: t.menu.nameInCoptic, count: 0 },
+    { id: "home" as const, icon: "book-open", label: menuLabel("nav_home", t.menu.home), count: 0 },
+    { id: "learn_coptic" as const, icon: "book", label: menuLabel("nav_learn_coptic", t.menu.learn_coptic), count: 0 },
+    { id: "coptic_bible" as const, icon: "bookmark", label: menuLabel("nav_coptic_bible", lang === "de" ? "Koptische Bibel" : (t.menu as any).coptic_bible || "الكتاب المقدس"), count: 0 },
+    { id: "name_coptic" as const, icon: "edit-3", label: menuLabel("nav_name_coptic", t.menu.nameInCoptic), count: 0 },
 
-    { id: "training" as const, icon: "target", label: t.menu.training, count: 0 },
-    { id: "favorites" as const, icon: "star", label: t.menu.favorites, count: favoritesCount },
-    { id: "history" as const, icon: "clock", label: t.menu.history, count: historyCount },
-    { id: "download" as const, icon: "download-cloud", label: t.menu.download, count: 0 },
-    { id: "about" as const, icon: "info", label: t.menu.about, count: 0 },
-  ];
+    { id: "training" as const, icon: "target", label: menuLabel("nav_training", t.menu.training), count: 0 },
+    { id: "favorites" as const, icon: "star", label: menuLabel("nav_favorites", t.menu.favorites), count: favoritesCount },
+    { id: "history" as const, icon: "clock", label: menuLabel("nav_history", t.menu.history), count: historyCount },
+    { id: "download" as const, icon: "download-cloud", label: menuLabel("nav_download", t.menu.download), count: 0 },
+    { id: "about" as const, icon: "info", label: menuLabel("nav_about", t.menu.about), count: 0 },
+  ].filter((item) => {
+    const visibilityKey: Partial<Record<typeof item.id, keyof typeof remoteSettings.controls>> = {
+      home: "nav_home", learn_coptic: "nav_learn_coptic", coptic_bible: "nav_coptic_bible", name_coptic: "nav_name_coptic",
+      training: "nav_training", favorites: "nav_favorites", history: "nav_history", download: "nav_download", about: "nav_about",
+    };
+    const key = visibilityKey[item.id];
+    return !key || remoteSettings.controls[key];
+  });
+  const socialVisibility = { facebook: remoteSettings.controls.link_social_facebook, whatsapp: remoteSettings.controls.link_social_whatsapp, telegram: remoteSettings.controls.link_social_telegram };
+  const socialUrls = { facebook: remoteSettings.content.socialFacebookUrl, whatsapp: remoteSettings.content.socialWhatsAppUrl, telegram: remoteSettings.content.socialTelegramUrl };
+  const visibleSocialLinks = SOCIAL_LINKS.filter((link) => socialVisibility[link.key]).map((link) => ({ ...link, url: socialUrls[link.key] }));
+  const drawerMessageLanguageKey: Record<Lang, keyof typeof remoteSettings.content> = {
+    ar: "drawerMessageAr", en: "drawerMessageEn", fr: "drawerMessageFr", de: "drawerMessageDe",
+  };
+  const drawerMessage = remoteSettings.content[drawerMessageLanguageKey[lang]] || remoteSettings.content.drawerMessage || config.drawerMsg;
 
 
   const drawerBg = isDark ? "#140303" : "#1A0505";
@@ -217,7 +232,7 @@ export function DrawerMenu({
         pointerEvents="auto"
       >
         <LinearGradient
-          colors={["#8B0000", "#65000A", "#3E0710"]}
+          colors={[remoteSettings.content.brandColor || "#8B0000", "#65000A", "#3E0710"]}
           start={{ x: 0, y: 0 }}
           end={{ x: 1, y: 1 }}
           style={[styles.header, { flexDirection: rtlFlex }]}
@@ -289,7 +304,7 @@ export function DrawerMenu({
           <View style={[styles.divider, { backgroundColor: dividerClr }]} />
 
           {/* الوضع الليلي */}
-          <View style={styles.sectionCard}>
+          {remoteSettings.controls.drawer_dark_mode && <View style={styles.sectionCard}>
             <TouchableOpacity style={[styles.settingRow, { flexDirection: rtlFlex }]} onPress={handleToggleDark} activeOpacity={0.7}>
               <View style={[styles.iconWrap, { backgroundColor: iconBg }]}>
                 <Feather name={isDark ? "moon" : "sun"} size={18} color="#C8A951" />
@@ -303,10 +318,10 @@ export function DrawerMenu({
                 ios_backgroundColor="#444"
               />
             </TouchableOpacity>
-          </View>
+          </View>}
 
           {/* اللغة */}
-          <View style={styles.sectionCard}>
+          {remoteSettings.controls.drawer_language && <View style={styles.sectionCard}>
             <View style={[styles.settingRow, { flexDirection: rtlFlex }]}>
               <View style={[styles.iconWrap, { backgroundColor: iconBg }]}>
                 <Feather name="globe" size={18} color="#C8A951" />
@@ -326,19 +341,19 @@ export function DrawerMenu({
                 ))}
               </View>
             </View>
-          </View>
+          </View>}
 
 
           <View style={[styles.divider, { backgroundColor: dividerClr }]} />
 
-          <View style={styles.contactRow}>
+          {remoteSettings.controls.drawer_contact_heading && <View style={styles.contactRow}>
             <View style={[styles.contactLine, { backgroundColor: "rgba(200,169,81,0.2)" }]} />
             <Text style={styles.contactTitle}>{t.contactUs}</Text>
             <View style={[styles.contactLine, { backgroundColor: "rgba(200,169,81,0.2)" }]} />
-          </View>
+          </View>}
 
-          <View style={[styles.socialRow, { flexDirection: rtlFlex }]}>
-            {SOCIAL_LINKS.map((link) => (
+          {remoteSettings.controls.drawer_social_section && visibleSocialLinks.length > 0 && <View style={[styles.socialRow, { flexDirection: rtlFlex }]}>
+            {visibleSocialLinks.map((link) => (
               <TouchableOpacity
                 key={link.key}
                 style={[styles.socialBtn, { borderColor: link.color + "40" }]}
@@ -356,10 +371,10 @@ export function DrawerMenu({
                 </Text>
               </TouchableOpacity>
             ))}
-          </View>
+          </View>}
 
           {/* رسالة الإدارة المتحركة أو الثابتة في القائمة */}
-          {config.drawerMsg ? (
+          {remoteSettings.controls.drawer_admin_message && drawerMessage ? (
             <View style={{ marginHorizontal: 12, marginTop: 10, marginBottom: 5 }}>
               <LinearGradient
                 colors={isDark ? ["#1E293B", "#0F172A"] : ["#F8FAFC", "#F1F5F9"]}
@@ -376,17 +391,17 @@ export function DrawerMenu({
                   fontSize: 13,
                   textAlign: 'center'
                 }}>
-                  {config.drawerMsg}
+                  {drawerMessage}
                 </Text>
               </LinearGradient>
             </View>
           ) : null}
 
-          <View style={styles.versionFooter}>
+          {remoteSettings.controls.drawer_version_label && <View style={styles.versionFooter}>
             <Text style={styles.versionText}>
               Version {Constants.expoConfig?.version || "1.0.0"}
             </Text>
-          </View>
+          </View>}
 
           <View style={{ height: 16 }} />
         </ScrollView>

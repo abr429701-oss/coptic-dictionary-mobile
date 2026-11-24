@@ -2,14 +2,14 @@
   "expo": {
     "name": "coptic ⲭⲏⲙⲓ",
     "slug": "coptic-dictionary",
-    "version": "1.2.1",
+    "version": "1.3.1",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
     "scheme": "coptic-dictionary",
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
     "splash": {
-      "image": "./assets/images/splash-icon.png",
+      "image": "./assets/images/splash-transparent.png",
       "resizeMode": "contain",
       "backgroundColor": "#070202"
     },
@@ -17,14 +17,16 @@
       "supportsTablet": true,
       "bundleIdentifier": "com.khmi.copticdictionary",
       "infoPlist": {
-        "UIBackgroundModes": ["fetch"]
+        "UIBackgroundModes": [
+          "fetch"
+        ]
       }
     },
     "android": {
       "backgroundColor": "#8B0000",
       "package": "com.khmi.copticdictionary",
       "softwareKeyboardLayoutMode": "resize",
-      "versionCode": 25,
+      "versionCode": 42,
       "adaptiveIcon": {
         "foregroundImage": "./assets/images/icon.png",
         "backgroundColor": "#8B0000"
@@ -36,7 +38,8 @@
         "android.permission.WAKE_LOCK",
         "android.permission.ACCESS_NETWORK_STATE",
         "android.permission.SCHEDULE_EXACT_ALARM",
-        "android.permission.USE_EXACT_ALARM"
+        "android.permission.USE_EXACT_ALARM",
+        "android.permission.POST_NOTIFICATIONS"
       ],
       "googleServicesFile": "./google-services.json"
     },
@@ -71,7 +74,8 @@
           "android": {
             "enableProguardInReleaseBuilds": true,
             "enableShrinkResources": true,
-            "minSdkVersion": 24
+            "minSdkVersion": 24,
+            "extraProguardRules": "-keep class expo.modules.adapters.react.apploader.** { *; }\n-keep class expo.modules.taskManager.** { *; }\n-keep class expo.modules.backgroundfetch.** { *; }\n-keep class expo.modules.interfaces.taskManager.** { *; }"
           }
         }
       ],

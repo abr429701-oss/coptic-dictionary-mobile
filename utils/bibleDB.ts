@@ -1,4 +1,5 @@
 import { BIBLE_ASSETS } from '../assets/bible/bibleAssets';
+import { getRemoteBibleBook, getRemoteBibleBooks, type BibleOverride } from '../lib/bibleRemote';
 
 export interface BibleVerse {
   lang: string;
@@ -15,6 +16,8 @@ export interface SearchResult extends BibleVerse {
 const bibleCache: Record<string, Record<number, any[]>> = {};
 const searchIndex: Record<string, { b: number, c: number, v: number, n: string, t: string }[]> = {};
 const pendingIndexes = new Set<string>(); // نظام حماية لمنع التكرار
+const bibleCacheUpdatedAt: Record<string, number> = {};
+const searchIndexUpdatedAt: Record<string, number> = {};
 
 // دالة لتنظيف النص من التشكيل حسب اللغة
 export function normalizeText(text: string, lang: string): string {
@@ -55,15 +58,13 @@ const stripCopticVerseNumberPrefix = (text: string): string => {
 
 async function getBookData(lang: string, bookId: number): Promise<any[]> {
   if (!bibleCache[lang]) bibleCache[lang] = {};
-  if (bibleCache[lang][bookId]) {
+  const cacheKey = `${lang}:${bookId}`;
+  if (bibleCache[lang][bookId] && Date.now() - (bibleCacheUpdatedAt[cacheKey] || 0) < 30_000) {
     const cachedData = bibleCache[lang][bookId];
     if (lang === 'cb') {
       for (const verse of cachedData) {
         const text = stripCopticVerseNumberPrefix(String(verse.text ?? ''));
-        if (text !== verse.text) {
-          verse.text = text;
-          verse.norm = normalizeText(text, lang);
-        }
+        if (text !== verse.text) { verse.text = text; verse.norm = normalizeText(text, lang); }
       }
     }
     return cachedData;
@@ -71,31 +72,38 @@ async function getBookData(lang: string, bookId: number): Promise<any[]> {
 
   try {
     const rawData = BIBLE_ASSETS[lang] ? BIBLE_ASSETS[lang][bookId] : null;
-    if (!rawData) return [];
-
-    const dataArray = Array.isArray(rawData) ? rawData : (rawData.verses || []);
-
-    // إضافة النص المنظف مسبقاً (Cache) لكل آية في السفر لسرعة البحث
-    const processedData = dataArray.map((v: any) => {
-      const text = lang === 'cb' ? stripCopticVerseNumberPrefix(String(v.text ?? '')) : v.text;
-      return {
-        ...v,
-        text,
-        book: bookId,
-        norm: normalizeText(text, lang)
-      };
-    });
+    const dataArray = rawData ? (Array.isArray(rawData) ? rawData : (rawData.verses || [])) : [];
+    const verses = new Map<string, any>();
+    for (const verse of dataArray) {
+      const text = lang === 'cb' ? stripCopticVerseNumberPrefix(String(verse.text ?? '')) : String(verse.text ?? '');
+      verses.set(`${Number(verse.chapter)}:${Number(verse.verse)}`, { ...verse, text, book: bookId, norm: normalizeText(text, lang) });
+    }
+    const overrides = await getRemoteBibleBook(bookId, lang);
+    for (const override of overrides as BibleOverride[]) {
+      const chapter = Number(override.chapter), verseNumber = Number(override.verse);
+      const key = `${chapter}:${verseNumber}`;
+      if (override.language === '*' && Boolean(override.deleted)) { verses.delete(key); continue; }
+      if (override.language !== lang) continue;
+      if (Boolean(override.deleted)) { verses.delete(key); continue; }
+      const text = lang === 'cb' ? stripCopticVerseNumberPrefix(String(override.text ?? '')) : String(override.text ?? '');
+      const previous = verses.get(key) || {};
+      verses.set(key, { ...previous, chapter, verse: verseNumber, text, book: bookId, norm: normalizeText(text, lang) });
+    }
+    const processedData = Array.from(verses.values()).sort((a, b) => Number(a.chapter) - Number(b.chapter) || Number(a.verse) - Number(b.verse));
+    const wasFresh = Boolean(bibleCache[lang][bookId]);
     bibleCache[lang][bookId] = processedData;
+    bibleCacheUpdatedAt[cacheKey] = Date.now();
+    if (wasFresh) delete searchIndex[lang];
     return processedData;
   } catch (e) {
     console.error(`Error loading book ${bookId} for ${lang}:`, e);
-    return [];
+    return bibleCache[lang][bookId] || [];
   }
 }
-
 export async function buildSearchIndex(langs: string[]) {
   for (const lang of langs) {
-    if (searchIndex[lang]) continue;
+    if (searchIndex[lang] && Date.now() - (searchIndexUpdatedAt[lang] || 0) < 30_000) continue;
+    delete searchIndex[lang];
     
     // الانتظار إذا كان الفهرس قيد البناء بالفعل في عملية أخرى
     while (pendingIndexes.has(lang)) {
@@ -108,7 +116,11 @@ export async function buildSearchIndex(langs: string[]) {
     try {
       console.log(`🏗️ Building index for ${lang}...`);
       const flat: any[] = [];
-      for (let i = 1; i <= 76; i++) {
+      const localBookIds = Object.keys(BIBLE_ASSETS[lang] || {}).map(Number);
+      const remoteBookIds = (await getRemoteBibleBooks()).map((book) => Number(book.id));
+      const bookIds = Array.from(new Set([...localBookIds, ...remoteBookIds])).sort((a, b) => a - b);
+      for (let index = 0; index < bookIds.length; index++) {
+        const i = bookIds[index];
         const data = await getBookData(lang, i);
         for (const v of data) {
           flat.push({
@@ -120,9 +132,10 @@ export async function buildSearchIndex(langs: string[]) {
           });
         }
         // تنفس للواجهة: منع التجميد (Yield to UI thread)
-        if (i % 10 === 0) await new Promise(resolve => setTimeout(resolve, 0));
+        if (index % 10 === 0) await new Promise(resolve => setTimeout(resolve, 0));
       }
       searchIndex[lang] = flat;
+      searchIndexUpdatedAt[lang] = Date.now();
       console.log(`✅ Index for ${lang} ready! (${flat.length} verses)`);
     } finally {
       pendingIndexes.delete(lang);
@@ -139,12 +152,12 @@ export async function preInitLangs(langs: string[]): Promise<void> {
 }
 
 export async function getChapterCount(bookId: number): Promise<{ chapter: number }[]> {
-  const data = await getBookData('ar', bookId);
   const chapters = new Set<number>();
-  for (const v of data) {
-    chapters.add(v.chapter);
+  for (const lang of ['ar', 'en', 'gr', 'he', 'cb', 'sy']) {
+    const data = await getBookData(lang, bookId);
+    for (const verse of data) chapters.add(Number(verse.chapter));
   }
-  return Array.from(chapters).sort((a, b) => a - b).map(c => ({ chapter: c }));
+  return Array.from(chapters).sort((a, b) => a - b).map(chapter => ({ chapter }));
 }
 
 export async function getMultiLangVerses(bookId: number, chapter: number, langs: string[]): Promise<any[]> {

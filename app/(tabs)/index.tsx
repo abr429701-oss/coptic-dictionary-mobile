@@ -42,6 +42,8 @@ import { useSplash } from "@/contexts/SplashContext";
 import AboutScreen from "./about";
 import { logActivity, backupUserData, logSearch } from "@/hooks/useUserTracking";
 import { useDailyWord } from "@/hooks/useDailyWord";
+import { useAudioDownloadReminder } from "@/hooks/useAudioDownloadReminder";
+import { useAppConfig } from "@/contexts/AppConfigContext";
 
 // أ¢â€‌â‚¬أ¢â€‌â‚¬أ¢â€‌â‚¬ ط·ع¾ط·آ·ط·آ¨ط¸ظ¹ط·آ¹ ط·آ§ط¸â€‍ط¸â€ ط·آµط¸ث†ط·آµ أ¢â€‌â‚¬أ¢â€‌â‚¬أ¢â€‌â‚¬أ¢â€‌â‚¬أ¢â€‌â‚¬أ¢â€‌â‚¬أ¢â€‌â‚¬أ¢â€‌â‚¬أ¢â€‌â‚¬أ¢â€‌â‚¬أ¢â€‌â‚¬أ¢â€‌â‚¬أ¢â€‌â‚¬أ¢â€‌â‚¬أ¢â€‌â‚¬أ¢â€‌â‚¬أ¢â€‌â‚¬أ¢â€‌â‚¬أ¢â€‌â‚¬أ¢â€‌â‚¬أ¢â€‌â‚¬أ¢â€‌â‚¬أ¢â€‌â‚¬أ¢â€‌â‚¬أ¢â€‌â‚¬أ¢â€‌â‚¬أ¢â€‌â‚¬أ¢â€‌â‚¬أ¢â€‌â‚¬أ¢â€‌â‚¬أ¢â€‌â‚¬أ¢â€‌â‚¬أ¢â€‌â‚¬أ¢â€‌â‚¬أ¢â€‌â‚¬أ¢â€‌â‚¬أ¢â€‌â‚¬أ¢â€‌â‚¬أ¢â€‌â‚¬أ¢â€‌â‚¬أ¢â€‌â‚¬أ¢â€‌â‚¬أ¢â€‌â‚¬أ¢â€‌â‚¬أ¢â€‌â‚¬أ¢â€‌â‚¬أ¢â€‌â‚¬أ¢â€‌â‚¬أ¢â€‌â‚¬أ¢â€‌â‚¬أ¢â€‌â‚¬أ¢â€‌â‚¬أ¢â€‌â‚¬أ¢â€‌â‚¬أ¢â€‌â‚¬أ¢â€‌â‚¬أ¢â€‌â‚¬أ¢â€‌â‚¬أ¢â€‌â‚¬أ¢â€‌â‚¬
 
@@ -645,6 +647,15 @@ export default function DictionaryScreen() {
   const insets = useSafeAreaInsets();
   const colors = useThemeColors();
   const { t, lang, setLang } = useLang();
+  const { remoteSettings } = useAppConfig();
+  const announcementLanguageKey: Record<Lang, keyof typeof remoteSettings.content> = {
+    ar: "announcementTextAr", en: "announcementTextEn", fr: "announcementTextFr", de: "announcementTextDe",
+  };
+  const remoteAnnouncement = (remoteSettings.content[announcementLanguageKey[lang]] || remoteSettings.content.announcementText).trim();
+  const announcementNow = Date.now();
+  const announcementStart = Date.parse(remoteSettings.content.announcementStartsAt || "") || 0;
+  const announcementEnd = Date.parse(remoteSettings.content.announcementEndsAt || "") || Number.MAX_SAFE_INTEGER;
+  const showRemoteAnnouncement = remoteSettings.controls.home_announcement && remoteAnnouncement.length > 0 && announcementNow >= announcementStart && announcementNow <= announcementEnd;
   const bgColor = colors.background;
 
   const [searchQuery, setSearchQuery] = useState("");
@@ -658,6 +669,7 @@ export default function DictionaryScreen() {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [activeScreen, setActiveScreen] = useState<Screen>("home");
   const [showCoptic, setShowCoptic] = useState(false);
+  const openSyncFromAudioReminder = useCallback(() => setSyncVisible(true), []);
 
 
 
@@ -899,7 +911,8 @@ export default function DictionaryScreen() {
 
   const filteredEntries = useMemo(() => {
     const query = deferredSearchQuery.trim();
-    if (!query) return showOnlyFavorites ? entries.filter((entry) => favoriteIds.has(entry.id)) : [];
+    const minimumLength = Math.max(1, Math.min(5, Number(remoteSettings.content.dictionaryMinSearchLength) || 1));
+    if (!query || Array.from(query).length < minimumLength) return showOnlyFavorites && !query ? entries.filter((entry) => favoriteIds.has(entry.id)) : [];
 
     const previous = searchCacheRef.current;
     let results: DictionaryEntry[];
@@ -992,9 +1005,14 @@ export default function DictionaryScreen() {
       } as DictionaryEntry;
     });
 
-    // `groups` is keyed by the same unique suggestion word used by the bot's word index.
-    return groupedResults;
-  }, [hasSearchQuery, deferredSearchQuery, filterMode, showOnlyFavorites, entries, favoriteIds, lang, searchPrefixIndexRevision]);
+    // Remote admin controls for result ordering and safety cap.
+    const sortMode = remoteSettings.content.dictionarySortMode;
+    if (sortMode === "coptic") groupedResults.sort((a, b) => String(a.coptic || "").localeCompare(String(b.coptic || "")));
+    else if (sortMode === "meaning") groupedResults.sort((a: any, b: any) => String(a._displayMeaning || "").localeCompare(String(b._displayMeaning || "")));
+    else if (sortMode === "audio") groupedResults.sort((a, b) => Number(Boolean(b.audioUrl)) - Number(Boolean(a.audioUrl)));
+    const maximumResults = Math.max(1, Math.min(10000, Number(remoteSettings.content.dictionaryMaxResults) || 5000));
+    return groupedResults.slice(0, maximumResults);
+  }, [hasSearchQuery, deferredSearchQuery, filterMode, showOnlyFavorites, entries, favoriteIds, lang, searchPrefixIndexRevision, remoteSettings.content.dictionaryMaxResults, remoteSettings.content.dictionaryMinSearchLength, remoteSettings.content.dictionarySortMode]);
 
   // ط·آ³ط·آ¬ط¸â€‍ ط·آ§ط¸â€‍ط·آ¨ط·آ­ط·آ« ط·آ¨ط·آ¹ط·آ¯ ط·ع¾ط¸ث†ط¸â€ڑط¸ظ¾ ط·آ§ط¸â€‍ط¸ئ’ط·ع¾ط·آ§ط·آ¨ط·آ©\u061B ط¸â€‍ط·آ§ ط·ع¾ط·آ³ط·آ¬ط¸â€‍ ط¸â€ ط·ع¾ط¸ظ¹ط·آ¬ط·آ© ط·ع¾ط·آ®ط·آµ ط·آ§ط·آ³ط·ع¾ط·آ¹ط¸â€‍ط·آ§ط¸â€¦ط¸â€¹ط·آ§ ط·آ³ط·آ§ط·ع¾ط·آ¨ط·آ§.
   useEffect(() => {
@@ -1072,33 +1090,47 @@ export default function DictionaryScreen() {
           displayMeaning={decorated._displayMeaning}
           forceLang={effectiveLang}
           compactResult={!!currentQuery.trim()}
-          showMeaningCount={hasSearchQuery && !showOnlyFavorites}
+          showMeaningCount={hasSearchQuery && !showOnlyFavorites && remoteSettings.controls.dictionary_meaning_count}
           meaningCount={(item as any)._meaningCount}
+          showAudio={remoteSettings.controls.dictionary_result_audio}
+          showSecondaryMeaning={remoteSettings.controls.dictionary_secondary_meaning}
+          showMetadata={remoteSettings.controls.dictionary_word_metadata}
+          showResultIndex={remoteSettings.controls.dictionary_result_index}
           audioDownloaded={audioIndex.has(item.audioId || item.id) || audioIndex.has(item.id)}
           cachePlayedAudio={cachePlayedAudio}
           onPress={() => handleWordPress(decorated)}
         />
       );
     },
-    [deferredSearchQuery, handleWordPress, lang, favorites, showOnlyFavorites, audioIndex, cachePlayedAudio, entries]
+    [deferredSearchQuery, handleWordPress, lang, favorites, showOnlyFavorites, audioIndex, cachePlayedAudio, entries, remoteSettings.controls]
   );
 
   const keyExtractor = useCallback((item: DictionaryEntry) => item.id, []);
   const bottomPad = showCoptic ? 320 : (Platform.OS === "web" ? 40 : 24);
-  const audioDownloadedCount = audioIndex.size;
-  const audioTotalCount = useMemo(() => {
+  const audioIds = useMemo(() => {
     const ids = new Set<string>();
     for (const entry of entries) {
       if (entry.audioUrl) ids.add(entry.audioId || entry.id);
     }
-    return ids.size;
+    return ids;
   }, [entries]);
+  const audioDownloadedCount = useMemo(
+    () => [...audioIds].filter((id) => audioIndex.has(id)).length,
+    [audioIds, audioIndex]
+  );
+  const audioTotalCount = audioIds.size;
+  useAudioDownloadReminder({
+    audioDownloadedCount,
+    audioTotalCount,
+    enabled: splashDone && !isLoading,
+    onOpenSync: openSyncFromAudioReminder,
+  });
   const isAboutPage = activeScreen === "about";
   const isMainView = activeScreen === "home" || activeScreen === "favorites" || activeScreen === "training";
 
   return (
     <View style={[styles.root, { backgroundColor: bgColor }]}>
-      <StatusBar barStyle="light-content" backgroundColor="#8B0000" />
+      <StatusBar barStyle="light-content" backgroundColor={remoteSettings.content.brandColor || "#8B0000"} />
 
       <View>
         <Header
@@ -1111,6 +1143,7 @@ export default function DictionaryScreen() {
           isOfflineReady={isOfflineReady}
           isAbout={isAboutPage}
           compact={activeScreen !== "home"}
+          showDateBar={remoteSettings.controls.home_coptic_date_bar}
         />
       </View>
 
@@ -1136,6 +1169,12 @@ export default function DictionaryScreen() {
         />
       ) : (
         <>
+          {activeScreen === "home" && showRemoteAnnouncement && (
+            <View style={[styles.remoteAnnouncement, { borderColor: remoteSettings.content.brandColor }]}>
+              <Feather name="bell" size={16} color={remoteSettings.content.brandColor} />
+              <Text style={styles.remoteAnnouncementText}>{remoteAnnouncement}</Text>
+            </View>
+          )}
           <SearchRow
             value={searchQuery}
             onChangeText={handleQueryChange}
@@ -1146,13 +1185,17 @@ export default function DictionaryScreen() {
             onFilterPress={() => setFilterVisible(true)}
             showCoptic={showCoptic}
             onToggleCoptic={handleToggleCoptic}
+            showFilterButton={remoteSettings.controls.dictionary_filter_button}
+            showCopticKeyboard={remoteSettings.controls.dictionary_coptic_keyboard}
+            showClearButton={remoteSettings.controls.dictionary_clear_query}
+            showSearchLogo={remoteSettings.controls.dictionary_search_logo}
           />
 
           <Animated.View style={{ flex: 1, marginBottom: keyboardAnim, paddingBottom: insets.bottom }}>
             <View style={[styles.listContainer, { backgroundColor: bgColor }]}>
               {!isLoading && (
                 <View style={styles.statsRow}>
-                  {favorites.length > 0 && (
+                  {remoteSettings.controls.home_favorites_shortcut && favorites.length > 0 && (
                     <TouchableOpacity
                       onPress={() => {
                         const next = !showOnlyFavorites;
@@ -1171,12 +1214,12 @@ export default function DictionaryScreen() {
                         color={showOnlyFavorites ? "#F5A623" : "#8B0000"}
                       />
                       <Text style={[styles.favBtnText, { color: showOnlyFavorites ? "#fff" : "#8B0000" }]}>
-                        {t.menu.favorites} ({favorites.length})
+                        {remoteSettings.labels.button_home_favorites.trim() || t.menu.favorites} ({favorites.length})
                       </Text>
                     </TouchableOpacity>
                   )}
-                  <Text style={styles.statsText}>{showOnlyFavorites ? t.favoritesCount(filteredEntries.length) : deferredSearchQuery ? t.wordCount(filteredEntries.length) : ""}</Text>
-                  {isOfflineReady && (
+                  {remoteSettings.controls.dictionary_result_counter && <Text style={styles.statsText}>{showOnlyFavorites ? t.favoritesCount(filteredEntries.length) : deferredSearchQuery ? t.wordCount(filteredEntries.length) : ""}</Text>}
+                  {remoteSettings.controls.home_connection_status && isOfflineReady && (
                     <View style={[styles.statsDot, { backgroundColor: "#4CAF50" }]} />
                   )}
                 </View>
@@ -1339,6 +1382,8 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontFamily: "Inter_400Regular",
   },
+  remoteAnnouncement: { marginHorizontal: 16, marginTop: 5, marginBottom: 7, minHeight: 42, paddingHorizontal: 12, paddingVertical: 8, borderRadius: 12, borderWidth: 1, backgroundColor: "rgba(200,169,81,0.08)", flexDirection: "row", alignItems: "center", gap: 9 },
+  remoteAnnouncementText: { flex: 1, color: "#E2E8F0", fontSize: 13, textAlign: "right", fontFamily: "Cairo_600SemiBold" },
 });
 
 

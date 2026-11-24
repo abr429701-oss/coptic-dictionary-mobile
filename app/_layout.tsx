@@ -19,14 +19,13 @@ import {
 } from "@expo-google-fonts/cairo";
 import {
   Cinzel_400Regular,
-  Cinzel_600SemiBold,
   Cinzel_700Bold,
 } from "@expo-google-fonts/cinzel";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { Stack } from "expo-router";
+import { Stack, useRouter } from "expo-router";
 import * as SplashScreen from "expo-splash-screen";
-import React, { useEffect, useState, Suspense } from "react";
-import { Platform, View, Text, TextInput } from "react-native";
+import React, { useEffect, useRef, useState, Suspense } from "react";
+import { DeviceEventEmitter, Platform, View, Text, TextInput } from "react-native";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 // import { SQLiteProvider } from 'expo-sqlite'; // Removed top-level import to prevent crash
 
@@ -181,6 +180,59 @@ const queryClient = new QueryClient({
 });
 
 function RootLayoutNav() {
+  const router = useRouter();
+  const recentlyHandled = useRef<{ id: string; at: number } | null>(null);
+
+  useEffect(() => {
+    const detailKey = (id: string) => `@coptic/cloudflare-notification/${id}`;
+    const lastResponseKey = "@coptic/last-cloudflare-notification-response";
+    const openDetail = async (payload: any, responseId?: string) => {
+      const id = String(payload?.notificationId || payload?.id || "").trim();
+      const imageUrl = String(payload?.imageUrl || "").trim();
+      if (!/^[A-Za-z0-9._:-]{1,160}$/.test(id)) return;
+      try { if (new URL(imageUrl).protocol !== "https:") return; } catch { return; }
+      if (responseId) {
+        const previous = recentlyHandled.current;
+        if (previous?.id === responseId && Date.now() - previous.at < 3000) return;
+        recentlyHandled.current = { id: responseId, at: Date.now() };
+        await AsyncStorage.setItem(lastResponseKey, responseId);
+      }
+      const detail = {
+        id,
+        title: String(payload?.title || "إشعار جديد").slice(0, 120),
+        body: String(payload?.body || "").slice(0, 4000),
+        imageUrl,
+        receivedAt: Date.now(),
+      };
+      await AsyncStorage.setItem(detailKey(id), JSON.stringify(detail));
+      router.push({ pathname: "/notifications/[id]", params: { id } } as any);
+    };
+    const eventSubscription = DeviceEventEmitter.addListener("open_cloudflare_notification_page", (payload) => {
+      void openDetail(payload);
+    });
+    const responseSubscription = Notifications.addNotificationResponseReceivedListener((response) => {
+      const content = response.notification.request.content;
+      const data = content.data || {};
+      if (data.type !== "cloudflare_notification" || typeof data.imageUrl !== "string") return;
+      void openDetail({ ...data, title: content.title, body: content.body }, response.notification.request.identifier);
+    });
+    let active = true;
+    void Notifications.getLastNotificationResponseAsync().then(async (response) => {
+      if (!active || !response) return;
+      const content = response.notification.request.content;
+      const data = content.data || {};
+      if (data.type !== "cloudflare_notification" || typeof data.imageUrl !== "string") return;
+      const responseId = response.notification.request.identifier;
+      if (responseId && await AsyncStorage.getItem(lastResponseKey) === responseId) return;
+      await openDetail({ ...data, title: content.title, body: content.body }, responseId);
+    }).catch((error) => console.warn("Could not restore notification details:", error));
+    return () => {
+      active = false;
+      eventSubscription.remove();
+      responseSubscription.remove();
+    };
+  }, [router]);
+
   return (
     <Stack screenOptions={{ headerShown: false }}>
       <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
@@ -190,7 +242,8 @@ function RootLayoutNav() {
 
 function AppContent() {
   const { isAdminMode, isLoaded: isAdminLoaded } = useAdmin();
-  const { config } = useAppConfig();
+  const { config, remoteSettings } = useAppConfig();
+  const updateAdminOnly = remoteSettings.content.appUpdateAdminOnly === "true";
   const [isBypassed, setIsBypassed] = useState(false);
 
   useEffect(() => {
@@ -243,10 +296,14 @@ function AppContent() {
         <SplashAnimation onFinish={markSplashDone} />
       )}
 
-      <NotificationModal notification={notification} onClose={clearNotification} />
+      <NotificationModal
+        notification={notification}
+        onClose={clearNotification}
+        onOpenImage={(item) => DeviceEventEmitter.emit("open_cloudflare_notification_page", item)}
+      />
 
       <UpdateForcedModal
-        updateInfo={config.forceUpdate ? { ...(updateInfo || {}), isMandatory: true } as any : updateInfo}
+        updateInfo={updateAdminOnly && !isAdminMode ? null : config.forceUpdate ? { ...(updateInfo || {}), isMandatory: true } as any : updateInfo}
         onSkip={skipUpdate}
       />
     </QueryClientProvider>
@@ -264,7 +321,6 @@ export default function RootLayout() {
     Cairo_600SemiBold,
     Cairo_700Bold,
     Cinzel_400Regular,
-    Cinzel_600SemiBold,
     Cinzel_700Bold,
     "CSAvaVeni-Regular": require("../assets/fonts/CSAvaVeni-Regular.ttf"),
     "ava_arsany": require("../assets/fonts/ava_arsany.ttf"),

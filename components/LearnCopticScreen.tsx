@@ -32,6 +32,7 @@ import * as TaskManager from 'expo-task-manager';
 import { useLang } from "@/contexts/LanguageContext";
 import { useTheme } from "@/contexts/ThemeContext";
 import { useAdmin } from "@/contexts/AdminContext";
+import { INITIAL_LESSONS } from "@/assets/lessonCatalog";
 import Animated, { FadeInDown, FadeInUp, SlideInLeft } from "react-native-reanimated";
 import { LinearGradient } from "expo-linear-gradient";
 import * as FileSystem from "expo-file-system/legacy";
@@ -46,8 +47,11 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import QRCode from "react-native-qrcode-svg";
 import { logActivity } from "@/hooks/useUserTracking";
 import { useAppConfig } from "@/contexts/AppConfigContext";
+import { useAppUpdate } from "@/hooks/useAppUpdate";
+import { lessonVisibilityKey } from "@/lib/remoteVisibility";
 import * as DocumentPicker from 'expo-document-picker';
-import { BUNDLED_DICTIONARY_SEED, fetchDictionaryData, type DictionaryEntry } from "@/hooks/useDictionary";
+import { fetchDictionaryData, type DictionaryEntry } from "@/hooks/useDictionary";
+import { loadEntries, saveEntries } from "@/hooks/useOfflineStorage";
 import { WordDetailModal } from "@/components/WordDetailModal";
 import { WordCard } from "@/components/WordCard";
 
@@ -219,6 +223,8 @@ interface Lesson {
   hideKey?: string;
 }
 
+const INITIAL_LESSON_DATA = INITIAL_LESSONS as Lesson[];
+
 interface LessonGlossaryWord {
   key: string;
   coptic: string;
@@ -339,10 +345,14 @@ const playExamSound = async (type: keyof typeof SOUNDS) => {
 export function LearnCopticScreen() {
   const { isDark } = useTheme();
   const { t, isRTL, lang } = useLang();
+  const { config, remoteSettings } = useAppConfig();
+  const { currentAppLink } = useAppUpdate();
+  const remoteControls = remoteSettings.controls;
+  const buttonLabel = (key: keyof typeof remoteSettings.labels, fallback: string) => remoteSettings.labels[key]?.trim() || fallback;
   const { isAdminMode, unlockAllLevels } = useAdmin();
   const insets = useSafeAreaInsets();
 
-  const [lessons, setLessons] = useState<Lesson[]>([]);
+  const [lessons, setLessons] = useState<Lesson[]>(INITIAL_LESSON_DATA);
   const [loading, setLoading] = useState(false);
   const [downloadingId, setDownloadingId] = useState<string | null>(null);
 
@@ -404,6 +414,7 @@ export function LearnCopticScreen() {
 
 
   const videoViewRef = useRef(null);
+  const lessonsCacheLoadedRef = useRef(false);
   const oralViewRef = useRef(null);
   const videoPlayerRef = useRef<Video>(null);
   const glossaryRequestRef = useRef(0);
@@ -467,6 +478,12 @@ export function LearnCopticScreen() {
 
   const getLessonNum = (txt: string) => {
     if (!txt) return 0;
+    const normalized = txt.replace(/[٠-٩]/g, (digit) => String("٠١٢٣٤٥٦٧٨٩".indexOf(digit)));
+    const numericMatch = normalized.match(/(?:الدرس|lesson)\s*[-#:]?\s*(\d{1,2})(?:\D|$)/i);
+    if (numericMatch) {
+      const number = Number(numericMatch[1]);
+      if (number >= 1 && number <= 9) return number;
+    }
     if (txt.includes("الأول") || txt.includes("الاول")) return 1;
     if (txt.includes("الثاني") || txt.includes("التاني")) return 2;
     if (txt.includes("الثالث") || txt.includes("التالت")) return 3;
@@ -478,6 +495,24 @@ export function LearnCopticScreen() {
     if (txt.includes("التاسع")) return 9;
     return 0;
   };
+
+  const isLessonVisible = (lesson: Lesson) => {
+    const title = (lesson.category || lesson.title || "").trim();
+    if (/مراجعة|review/i.test(title)) return remoteControls.learn_review_videos;
+    if (/فيديو تعريفي|introductory video/i.test(title)) return remoteControls.learn_intro_video;
+    if (/مقدمة.*حروف|حروف.*مقدمة|letters introduction/i.test(title)) return remoteControls.learn_letter_intro;
+    if (/الدرس|lesson/i.test(title)) {
+      const number = getLessonNum(title);
+      if (number >= 1 && number <= 9) return remoteSettings.visibility.lessons[lessonVisibilityKey(lesson.level, lesson.videoId)] !== false;
+    }
+    return true;
+  };
+
+  useEffect(() => {
+    if (!selectedLevel || !selectedCategory) return;
+    const categoryStillVisible = lessons.some((lesson) => String(lesson.level) === String(selectedLevel) && lesson.category === selectedCategory && isLessonVisible(lesson));
+    if (!categoryStillVisible) setSelectedCategory(null);
+  }, [selectedLevel, selectedCategory, lessons, remoteSettings.visibility.lessons, remoteControls.learn_review_videos, remoteControls.learn_intro_video, remoteControls.learn_letter_intro]);
 
   const isCodeFormValid = studentName.trim().split(/\s+/).length >= 3 && studentPhone.replace(/[^0-9]/g, "").length >= 8;
 
@@ -1160,14 +1195,22 @@ export function LearnCopticScreen() {
   };
 
   const fetchLessons = async (isSilent = false) => {
-    // تنظيف الكاش القديم إذا كان مسبباً للمشاكل (اختياري لكن مفيد هنا)
-    const cached = await AsyncStorage.getItem(CACHE_KEY);
-    if (cached && lessons.length === 0) {
-      const cachedData = JSON.parse(cached);
-      const linked = await linkLocalLessons(cachedData);
-      setLessons(linked);
+    void isSilent;
+    // Load the cached live list once; the bundled catalog already renders immediately.
+    let cached: string | null = null;
+    if (!lessonsCacheLoadedRef.current) {
+      lessonsCacheLoadedRef.current = true;
+      cached = await AsyncStorage.getItem(CACHE_KEY);
+      if (cached) {
+        try {
+          const cachedData = JSON.parse(cached);
+          if (Array.isArray(cachedData) && cachedData.length > 0) {
+            const linked = await linkLocalLessons(cachedData);
+            setLessons(linked);
+          }
+        } catch { }
+      }
     }
-    // if (!isSilent && lessons.length === 0) setLoading(true);
 
     try {
       const response = await fetch(`${APPS_SCRIPT_URL}?action=getLessons&t=${Date.now()}`);
@@ -2628,10 +2671,27 @@ export function LearnCopticScreen() {
     const allowJenkim = lessonNumber >= 5;
     const requestId = ++glossaryRequestRef.current;
     try {
+      const cachedEntries = await loadEntries();
+      if (requestId !== glossaryRequestRef.current) return;
+      if (cachedEntries?.length) {
+        const cachedWords = buildLessonGlossaryWords(cachedEntries, allowedLetters, lessonLetters, allowJenkim);
+        setLessonGlossary((current) => current?.lessonNumber === lessonNumber
+          ? { ...current, words: cachedWords, loading: false, error: undefined }
+          : current);
+      }
+
       const network = await NetInfo.fetch();
-      if (network.isConnected !== true || network.isInternetReachable === false) return;
+      if (network.isConnected !== true || network.isInternetReachable === false) {
+        if (!cachedEntries?.length) {
+          setLessonGlossary((current) => current?.lessonNumber === lessonNumber
+            ? { ...current, loading: false, error: "اتصل بالإنترنت مرة واحدة لتنزيل القاموس للاستخدام دون اتصال." }
+            : current);
+        }
+        return;
+      }
       if (requestId !== glossaryRequestRef.current) return;
       const entries = await fetchDictionaryData();
+      await saveEntries(entries).catch(() => undefined);
       const words = buildLessonGlossaryWords(entries, allowedLetters, lessonLetters, allowJenkim);
       if (requestId === glossaryRequestRef.current) {
         setLessonGlossary((current) => current?.lessonNumber === lessonNumber
@@ -2639,7 +2699,9 @@ export function LearnCopticScreen() {
           : current);
       }
     } catch {
-      // Keep the bundled/current list silently; a later online event or reopen retries the source.
+      setLessonGlossary((current) => requestId === glossaryRequestRef.current && current?.lessonNumber === lessonNumber && current.words.length === 0
+        ? { ...current, loading: false, error: "تعذر تحميل القاموس. اتصل بالإنترنت ثم أعد المحاولة." }
+        : current);
     }
   };
 
@@ -2648,13 +2710,8 @@ export function LearnCopticScreen() {
     if (!lessonLetters) return;
 
     glossaryRequestRef.current += 1;
-    const allowJenkim = lessonNumber >= 5;
-    const allowedLetters = Object.entries(LEVEL_ONE_GLOSSARY_LETTERS)
-      .filter(([number]) => Number(number) <= lessonNumber)
-      .flatMap(([, letters]) => letters);
-    const instantWords = buildLessonGlossaryWords(BUNDLED_DICTIONARY_SEED, allowedLetters, lessonLetters, allowJenkim);
-    setLessonGlossary({ lessonNumber, lessonTitle: lesson.title, letters: lessonLetters, words: instantWords, loading: false });
-    // The local list is immediate; a successful online fetch silently replaces it.
+    setLessonGlossary({ lessonNumber, lessonTitle: lesson.title, letters: lessonLetters, words: [], loading: true });
+    // Restore the saved dictionary first; if absent, download it once while online.
     void refreshLessonGlossaryFromSource(lessonNumber);
   };
 
@@ -2755,7 +2812,7 @@ export function LearnCopticScreen() {
             <TouchableOpacity style={styles.premiumActionBtn} onPress={() => { triggerHaptic(); setViewingSummary(item); logActivity("modal_open", undefined, `Summary: ${item.title}`); }}>
               <LinearGradient colors={["#9b59b6", "#8e44ad"]} style={styles.premiumActionInner}>
                 <Feather name="image" size={18} color="#FFF" />
-                <Text style={styles.premiumActionTxt}>ملخص</Text>
+                <Text style={styles.premiumActionTxt}>{buttonLabel("button_lesson_summary", "ملخص")}</Text>
               </LinearGradient>
             </TouchableOpacity>
           )}
@@ -2763,7 +2820,7 @@ export function LearnCopticScreen() {
             <TouchableOpacity style={styles.premiumActionBtn} onPress={() => { triggerHaptic(); setViewingOral(item); logActivity("modal_open", undefined, `Oral/Training: ${item.title}`); }}>
               <LinearGradient colors={["#C8A951", "#8B6B1E"]} style={styles.premiumActionInner}>
                 <Feather name={(item.level === "2" || item.level === "المستوى الثاني") ? "book-open" : "mic"} size={18} color="#FFF" />
-                <Text style={styles.premiumActionTxt}>{(item.level === "2" || item.level === "المستوى الثاني") ? "التدريب" : "الشفوي"}</Text>
+                <Text style={styles.premiumActionTxt}>{buttonLabel("button_lesson_training", (item.level === "2" || item.level === "المستوى الثاني") ? "التدريب" : "الشفوي")}</Text>
               </LinearGradient>
             </TouchableOpacity>
           )}
@@ -2854,7 +2911,7 @@ export function LearnCopticScreen() {
                   style={styles.premiumActionInner}
                 >
                   <Feather name={(!isPrevExamDone && !isExamDone) ? "lock" : "edit-3"} size={18} color="#FFF" />
-                  <Text style={styles.premiumActionTxt}>الامتحان</Text>
+                  <Text style={styles.premiumActionTxt}>{buttonLabel("button_lesson_exam", "الامتحان")}</Text>
                 </LinearGradient>
               </TouchableOpacity>
             );
@@ -2875,14 +2932,14 @@ export function LearnCopticScreen() {
               style={styles.lessonGlossaryButtonInner}
             >
               <Feather name="book-open" size={18} color={isDark ? "#E5C76A" : "#8B6B1E"} />
-              <Text style={[styles.lessonGlossaryButtonText, { color: isDark ? "#E5C76A" : "#7D1B16" }]}>قاموس كلمات الدرس</Text>
+              <Text style={[styles.lessonGlossaryButtonText, { color: isDark ? "#E5C76A" : "#7D1B16" }]}>{buttonLabel("button_lesson_glossary", "قاموس كلمات الدرس")}</Text>
               <Feather name={isRTL ? "chevron-left" : "chevron-right"} size={18} color={isDark ? "#E5C76A" : "#8B6B1E"} />
             </LinearGradient>
           </TouchableOpacity>
         )}
 
         {!item.localVideo && (
-          <TouchableOpacity onPress={() => { triggerHaptic(); downloadOne(item); }} style={styles.downBtn}>
+          <TouchableOpacity accessibilityRole="button" accessibilityLabel={buttonLabel("button_lesson_download", "تنزيل الدرس")} onPress={() => { triggerHaptic(); downloadOne(item); }} style={styles.downBtn}>
             {downloadingId === vId ? <ActivityIndicator size="small" color="#C8A951" /> : <Feather name="download-cloud" size={18} color="#C8A951" />}
           </TouchableOpacity>
         )}
@@ -3512,7 +3569,6 @@ export function LearnCopticScreen() {
   };
 
   const renderMainContent = () => {
-    const { config } = useAppConfig();
     const isUserAdmin = isAdminMode && (userEmail || "").trim().endsWith("000");
 
     if (examModal) return renderExamContent();
@@ -3641,7 +3697,7 @@ export function LearnCopticScreen() {
     }
 
     if (!selectedCategory) {
-      const cats = Array.from(new Set(lessons.filter(l => l.level === selectedLevel).map(l => l.category)));
+      const cats = Array.from(new Set(lessons.filter(l => String(l.level) === String(selectedLevel) && isLessonVisible(l)).map(l => l.category)));
       const levelTitle = selectedLevel === "1" ? "المستوى الأول" : (selectedLevel === "2" ? "المستوى الثاني" : `${t.learnCoptic.level} ${selectedLevel}`);
       return (
         <View style={[styles.container, { backgroundColor: isDark ? "#121212" : "#F8F8F8", paddingBottom: insets.bottom }]}>
@@ -3774,7 +3830,7 @@ export function LearnCopticScreen() {
                       color="#FFF"
                     />
                     <Text style={{ fontSize: 20, fontFamily: "Cairo_700Bold", color: "#FFF" }}>
-                      {isFinalExamDone && !unlockAllLevels ? "تم حل الامتحان النهائي ✓" : "الامتحان النهائي"}
+                      {isFinalExamDone && !unlockAllLevels ? "تم حل الامتحان النهائي ✓" : buttonLabel("button_final_exam", "الامتحان النهائي")}
                     </Text>
                   </LinearGradient>
                 </TouchableOpacity>
@@ -3793,7 +3849,7 @@ export function LearnCopticScreen() {
             >
               <LinearGradient colors={["#1e3c72", "#2a5298"]} style={{ paddingVertical: 15, flexDirection: 'row', justifyContent: 'center', alignItems: 'center', gap: 12 }}>
                 <Feather name="award" size={22} color="#FFF" />
-                <Text style={{ fontSize: 18, fontFamily: "Cairo_700Bold", color: "#FFF" }}>الحصول على الشهادة</Text>
+                <Text style={{ fontSize: 18, fontFamily: "Cairo_700Bold", color: "#FFF" }}>{buttonLabel("button_get_certificate", "الحصول على الشهادة")}</Text>
               </LinearGradient>
             </TouchableOpacity>
           </ScrollView>
@@ -3811,7 +3867,7 @@ export function LearnCopticScreen() {
         </View>
 
         <FlatList
-          data={lessons.filter(l => (l.level === selectedLevel) && l.category === selectedCategory)}
+          data={lessons.filter(l => String(l.level) === String(selectedLevel) && l.category === selectedCategory && isLessonVisible(l))}
           renderItem={renderLessonItem}
           keyExtractor={l => l.videoId}
           contentContainerStyle={{ padding: 15 }}
@@ -4928,7 +4984,7 @@ export function LearnCopticScreen() {
             {/* Branding Footer */}
             <View style={{ marginTop: 30, alignItems: 'center', borderTopWidth: 1, borderTopColor: 'rgba(255,255,255,0.1)', paddingTop: 25 }}>
               <View style={{ backgroundColor: '#FFF', padding: 8, borderRadius: 12, marginBottom: 15 }}>
-                <QRCode value="https://play.google.com/store/apps/details?id=com.khmi.dictionary" size={80} />
+                <QRCode value={currentAppLink || "https://play.google.com/store/apps/details?id=com.khmi.coptic"} size={80} />
               </View>
               <Text style={{ fontSize: 14, fontFamily: 'Cairo_600SemiBold', color: '#AAA', textAlign: 'center' }}>حمل التطبيق لتعلم القبطية مجانا</Text>
               <Text style={{ fontSize: 16, fontFamily: 'Cairo_700Bold', color: '#C8A951', textAlign: 'center', marginTop: 8 }}>Ebram merzik</Text>

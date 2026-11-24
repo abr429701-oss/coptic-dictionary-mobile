@@ -1,7 +1,7 @@
 import * as TaskManager from "expo-task-manager";
 import * as BackgroundFetch from "expo-background-fetch";
 import { Platform } from "react-native";
-import { BUNDLED_DICTIONARY_SEED, fetchDictionaryData } from "./useDictionary";
+import { fetchDictionaryData } from "./useDictionary";
 import {
   loadEntries,
   saveEntries,
@@ -46,7 +46,7 @@ if (!TaskManager.isTaskDefined(AUDIO_BACKGROUND_TASK)) {
 
     try {
       await ensureAudioDir();
-      let allEntries = (await loadEntries()) ?? BUNDLED_DICTIONARY_SEED;
+      let allEntries = (await loadEntries()) ?? [];
       let changedSheetData = false;
 
       // Poll the public sheet directly; no Apps Script or server-side relay is used.

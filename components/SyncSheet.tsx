@@ -55,7 +55,7 @@ function audioActionLabels(lang: string) {
 }
 
 // ─── عداد دائري احترافي ────────────────────────────────────────────────────
-function CircleProgress({ ratio, phase }: { ratio: number; phase: string }) {
+function CircleProgress({ ratio, phase, stage }: { ratio: number; phase: string; stage?: "archive" | "extract" | "individual" }) {
   const colors = useThemeColors();
   const { t, lang } = useLang();
   const animVal = useRef(new Animated.Value(0)).current;
@@ -77,23 +77,42 @@ function CircleProgress({ ratio, phase }: { ratio: number; phase: string }) {
   const isDone = phase === "done";
   const isData = phase === "data";
   const isPaused = phase === "paused";
+  const isActive = phase === "audio";
+  const isError = phase === "error";
   const labels = audioActionLabels(lang);
 
   const getPhaseSubText = () => {
     if (isDone) return t.sync.phaseDone;
     if (isData) return t.sync.phaseData;
     if (isPaused) return labels.paused;
+    if (isActive) return t.sync.downloading;
+    if (isError) return t.download.phaseError;
     return t.sync.reDownload;
   };
 
   const getProgressLabel = () => {
     if (isData) return t.sync.phaseData;
+    if (stage === "extract") return "";
+    if (stage === "archive") {
+      if (lang === "ar") return "تنزيل حزمة الصوتيات";
+      if (lang === "fr") return "Téléchargement du paquet audio";
+      if (lang === "de") return "Audio-Paket wird geladen";
+      return "Downloading audio archive";
+    }
+    if (stage === "individual") {
+      if (lang === "ar") return "تنزيل الملفات المتبقية";
+      if (lang === "fr") return "Téléchargement des fichiers restants";
+      if (lang === "de") return "Verbleibende Dateien werden geladen";
+      return "Downloading remaining files";
+    }
     return t.sync.phaseAudio(displayPct, 100);
   };
+  const progressLabel = getProgressLabel();
 
   return (
     <View style={cp.wrapper}>
       <View style={[cp.circle, { borderColor: isDone ? "#4CAF50" : "#C8A951" }]}>
+        {isActive && <ActivityIndicator size="small" color="#C8A951" />}
         <Text style={[cp.pct, { color: isDone ? "#4CAF50" : "#C8A951" }]}>
           {isDone ? "✓" : isPaused ? "Ⅱ" : `${displayPct}%`}
         </Text>
@@ -118,9 +137,9 @@ function CircleProgress({ ratio, phase }: { ratio: number; phase: string }) {
         />
       </View>
 
-      {!isDone && (
+      {!isDone && !!progressLabel && (
         <Text style={[cp.label, { color: colors.textSecondary }]}>
-          {getProgressLabel()}
+          {progressLabel}
         </Text>
       )}
     </View>
@@ -168,14 +187,21 @@ export function SyncSheet({
   // تحديث القاموس يجري بالخلفية؛ لا يعطّل التنزيل اليدوي.
   const isActive = downloadProgress.phase === "audio";
   const isPaused = downloadProgress.phase === "paused";
+  const isError = downloadProgress.phase === "error";
+  const hasResumableProgress =
+    isPaused &&
+    downloadProgress.total > 0 &&
+    ((downloadProgress.current > 0 && downloadProgress.current < downloadProgress.total) || downloadProgress.resumable === true);
   const labels = audioActionLabels(lang);
   const audioSizeLabel = audioSizeBytes > 0
     ? `${audioSizeKnown ? "" : "≈"}${(audioSizeBytes / 1_000_000).toFixed(0)} MB`
     : lang === "ar" ? "حجم الصوتيات غير متاح حاليًا" : lang === "fr" ? "Taille audio indisponible" : lang === "de" ? "Audiogröße nicht verfügbar" : "Audio size currently unavailable";
 
   const progressRatio =
-    (downloadProgress.phase === "audio" || downloadProgress.phase === "paused") && downloadProgress.total > 0
-      ? downloadProgress.current / downloadProgress.total
+    (downloadProgress.phase === "audio" || downloadProgress.phase === "paused" || isError) && downloadProgress.total > 0
+      ? downloadProgress.overallProgress !== undefined
+        ? Math.max(0, Math.min(1, downloadProgress.overallProgress))
+        : downloadProgress.current / downloadProgress.total
       : downloadProgress.phase === "data" ? 0.05
         : downloadProgress.phase === "done" ? 1
           : 0;
@@ -270,15 +296,21 @@ export function SyncSheet({
               : `${entryCount.toLocaleString(lang)} words · ${Math.min(audioCount, audioTotalCount).toLocaleString(lang)} / ${audioTotalCount.toLocaleString(lang)} audio files saved`}
           </Text>
 
-          {(isActive || isPaused || downloadProgress.phase === "done") && (
+          {(isActive || isPaused || isError || downloadProgress.phase === "done") && (
             <View style={[styles.progressBox, { backgroundColor: colors.card, borderColor: colors.cardBorder }]}>
-              <CircleProgress ratio={progressRatio} phase={downloadProgress.phase} />
+              <CircleProgress ratio={progressRatio} phase={downloadProgress.phase} stage={downloadProgress.stage} />
               {downloadProgress.total > 0 && (
-                <Text style={[styles.progressCount, { color: colors.textSecondary }]}>
+                <Text style={[styles.progressCount, { color: colors.textSecondary }]}> 
                   {downloadProgress.current.toLocaleString(lang)} / {downloadProgress.total.toLocaleString(lang)}
                 </Text>
               )}
             </View>
+          )}
+
+          {downloadProgress.errorMsg && (
+            <Text style={{ color: "#C0392B", fontSize: 12, lineHeight: 18, marginTop: 8, textAlign: lang === "ar" ? "right" : "left", writingDirection: lang === "ar" ? "rtl" : "ltr" }}>
+              {downloadProgress.errorMsg}
+            </Text>
           )}
 
           {syncResult && (
@@ -331,14 +363,14 @@ export function SyncSheet({
             >
               {pausing || (downloading && !isActive)
                 ? <ActivityIndicator size="small" color={colors.copticText} />
-                : <Feather name={isActive ? "pause-circle" : isPaused ? "play-circle" : "download-cloud"} size={18} color={colors.copticText} />
+                : <Feather name={isActive ? "pause-circle" : hasResumableProgress ? "play-circle" : "download-cloud"} size={18} color={colors.copticText} />
               }
-              <Text style={[styles.btnSecondaryText, { color: colors.copticText }]}>
+              <Text style={[styles.btnSecondaryText, { color: colors.copticText }]}> 
                 {pausing
                   ? labels.pausing
                   : isActive
                   ? labels.pause
-                  : isPaused
+                  : hasResumableProgress
                     ? labels.resume
                     : downloading
                       ? t.sync.downloading

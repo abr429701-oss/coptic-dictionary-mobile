@@ -18,11 +18,12 @@ interface HeaderProps {
   isOfflineReady: boolean;
   isAbout?: boolean;
   compact?: boolean;
+  showDateBar?: boolean;
   title?: string;
   subTitle?: string;
 }
 
-export function Header({ onMenuPress, onSyncPress, isOfflineReady, isAbout = false, compact = false, title, subTitle }: HeaderProps) {
+export function Header({ onMenuPress, onSyncPress, isOfflineReady, isAbout = false, compact = false, showDateBar = true, title, subTitle }: HeaderProps) {
   const insets = useSafeAreaInsets();
   const { t } = useLang();
   const topPad = Platform.OS === "web" ? 16 : insets.top;
@@ -78,7 +79,7 @@ export function Header({ onMenuPress, onSyncPress, isOfflineReady, isAbout = fal
       ) : null}
 
       {/* شريط التاريخ القبطي والميلادي */}
-      {!compact && !isAbout && <CopticDateBar />}
+      {!compact && !isAbout && showDateBar && <CopticDateBar />}
 
       {!compact && <View style={styles.goldenBar} />}
     </LinearGradient>

@@ -1,12 +1,13 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { Platform, AppState, AppStateStatus } from "react-native";
+import NetInfo from "@react-native-community/netinfo";
 import {
   AUDIO_SIZE_IS_KNOWN,
   AUDIO_TOTAL_SIZE_BYTES,
-  BUNDLED_DICTIONARY_SEED,
   calculateAudioLibrarySize,
   estimateAudioLibrarySize,
   fetchDictionaryData,
+  getGithubAudioArchivePath,
 } from "./useDictionary";
 import type { DictionaryEntry } from "./useDictionary";
 import {
@@ -29,17 +30,29 @@ import {
   saveAudioUpdateQueue,
 } from "./useOfflineStorage";
 import {
+  discardAudioArchive,
+  downloadAudioArchive,
+  extractAudioArchive,
+  hasAudioArchiveToResume,
+} from "./audioArchive";
+import type { AudioArchiveDownloadTask } from "./audioArchive";
+import {
   findDownloadedAudioUpdates,
   mergeAudioUpdateJobs,
   processAudioUpdateQueue,
 } from "./audioUpdateUtils";
 import { updateUserInfo } from "./useUserTracking";
+import { useAppConfig } from "@/contexts/AppConfigContext";
+import type { DictionarySourceConfig } from "./useDictionary";
 
 export interface DownloadProgress {
   phase: "idle" | "data" | "audio" | "paused" | "done" | "error";
   current: number;
   total: number;
   currentWord: string;
+  stage?: "archive" | "extract" | "individual";
+  overallProgress?: number;
+  resumable?: boolean;
   errorMsg?: string;
 }
 
@@ -54,7 +67,7 @@ export interface OfflineDictionary {
   audioIndex: Set<string>;
   audioSizeBytes: number;
   audioSizeKnown: boolean;
-  startDownload: (opts?: { audioOnly?: boolean }) => Promise<void>;
+  startDownload: (opts?: { audioOnly?: boolean; automatic?: boolean }) => Promise<void>;
   cachePlayedAudio: (entry: DictionaryEntry) => Promise<void>;
   sync: () => Promise<{ newCount: number; audioCount: number }>;
   getAudioSource: (entry: DictionaryEntry) => Promise<string | null>;
@@ -63,9 +76,11 @@ export interface OfflineDictionary {
 }
 
 const SYNC_INTERVAL_MS = 2 * 60 * 1000;
-const AUDIO_CHUNK_SIZE = 96;
-const AUDIO_CONCURRENCY = Platform.OS === "android" ? 8 : Platform.OS === "web" ? 6 : 12;
+// Larger checkpoints avoid repeatedly serializing the full audio index/queue during bulk setup.
+const AUDIO_CHUNK_SIZE = 256;
+const AUDIO_CONCURRENCY = Platform.OS === "android" ? 16 : Platform.OS === "web" ? 8 : 12;
 const PROGRESS_THROTTLE_MS = 250;
+const ARCHIVE_PROGRESS_FALLBACK_BYTES = 35_000_000;
 const EMPTY_PROGRESS: DownloadProgress = {
   phase: "idle",
   current: 0,
@@ -120,7 +135,7 @@ async function fingerprintEntries(entries: DictionaryEntry[], chunkSize = 500): 
   return `${entries.length}:${h1 >>> 0}:${h2 >>> 0}`;
 }
 
-const initialEntries = BUNDLED_DICTIONARY_SEED;
+const initialEntries: DictionaryEntry[] = [];
 
 async function runConcurrent<T>(
   items: T[],
@@ -159,11 +174,31 @@ async function downloadAudioBatch(
 }
 
 export function useOfflineDictionary(): OfflineDictionary {
-  // Seed محلي يُعرض قبل أي اتصال أو قراءة من القرص.
+  const { remoteSettings } = useAppConfig();
+  const dictionarySource: DictionarySourceConfig = {
+    spreadsheet: remoteSettings.content.dictionarySpreadsheet,
+    sheetName: remoteSettings.content.dictionarySheetName,
+    columns: {
+      coptic: remoteSettings.content.dictionaryColumnCoptic,
+      arabic: remoteSettings.content.dictionaryColumnArabic,
+      english: remoteSettings.content.dictionaryColumnEnglish,
+      french: remoteSettings.content.dictionaryColumnFrench,
+      german: remoteSettings.content.dictionaryColumnGerman,
+      origin: remoteSettings.content.dictionaryColumnOrigin,
+      wordType: remoteSettings.content.dictionaryColumnWordType,
+      audio: remoteSettings.content.dictionaryColumnAudio,
+      gender: remoteSettings.content.dictionaryColumnGender,
+    },
+  };
+  const dictionarySourceRef = useRef(dictionarySource);
+  dictionarySourceRef.current = dictionarySource;
+  const sourceSignature = JSON.stringify(dictionarySource);
+  const sourceSignatureRef = useRef(sourceSignature);
+  // Cached entries are restored from device storage; a fresh install syncs online once.
   const [entries, setEntries] = useState<DictionaryEntry[]>(initialEntries);
-  const [isLoading] = useState(false);
+  const [isLoading, setIsLoading] = useState(true);
   const [isSetupDoneState, setIsSetupDoneState] = useState(true);
-  const [isOfflineReady, setIsOfflineReady] = useState(initialEntries.length > 0);
+  const [isOfflineReady, setIsOfflineReady] = useState(false);
   const [isOnline, setIsOnline] = useState(false);
   const [lastSync, setLastSyncState] = useState<Date | null>(null);
   const [audioIndex, setAudioIndex] = useState<Set<string>>(new Set());
@@ -173,7 +208,9 @@ export function useOfflineDictionary(): OfflineDictionary {
 
   const abortRef = useRef(false);
   const downloadingRef = useRef(false);
+  const archiveDownloadTaskRef = useRef<AudioArchiveDownloadTask | null>(null);
   const autoUpdatingRef = useRef(false);
+  const autoDownloadAttemptedRef = useRef(false);
   const audioSizeRequestRef = useRef(0);
   const entriesRef = useRef<DictionaryEntry[]>(initialEntries);
   // لا تحسب بصمة 16 ألف سجل داخل render؛ useRef يحفظ القيمة لكن وسيطته كانت تُنفّذ كل render.
@@ -269,6 +306,7 @@ export function useOfflineDictionary(): OfflineDictionary {
 
   useEffect(() => {
     entriesRef.current = entries;
+    autoDownloadAttemptedRef.current = false;
   }, [entries]);
 
   useEffect(() => {
@@ -286,7 +324,7 @@ export function useOfflineDictionary(): OfflineDictionary {
 
     const task = (async () => {
       try {
-        const freshEntries = await fetchDictionaryData();
+        const freshEntries = await fetchDictionaryData(dictionarySourceRef.current);
         const nextSignature = await fingerprintEntries(freshEntries);
         const hasChanges = nextSignature !== signatureRef.current;
         let queuedAudioCount = 0;
@@ -360,19 +398,27 @@ export function useOfflineDictionary(): OfflineDictionary {
     return task;
   }, [refreshAudioSize, runPendingAudioUpdates]);
 
-  // Load cached JSON without blocking the first render, then sync immediately in the background.
+  useEffect(() => {
+    if (sourceSignatureRef.current === sourceSignature) return;
+    sourceSignatureRef.current = sourceSignature;
+    if (entriesRef.current.length > 0) void runSync(false).catch(() => undefined);
+  }, [sourceSignature, runSync]);
+
+  // Restore the saved dictionary first, then refresh it online in the background.
   useEffect(() => {
     let cancelled = false;
 
     const initialize = async () => {
-      const [localEntries, lastSyncDate, localAudioIndex, pendingIds, wasPaused] = await Promise.all([
+      const [localEntries, lastSyncDate, localAudioIndex, pendingIds, wasPaused, hasArchiveProgress] = await Promise.all([
         loadEntries(),
         getLastSync(),
         loadAudioIndex(),
         loadPendingQueue(),
         getAudioDownloadPaused(),
+        hasAudioArchiveToResume(),
       ]);
       if (cancelled) return;
+      setIsLoading(false);
 
       const activeEntries = localEntries?.length ? localEntries : initialEntries;
       if (localEntries?.length) {
@@ -395,35 +441,42 @@ export function useOfflineDictionary(): OfflineDictionary {
 
       const audioEntries = uniqueAudioEntries(activeEntries);
       const pendingAudioIds = new Set(pendingIds);
+      const completedAudioCount = audioEntries.reduce(
+        (count, entry) => count + (localAudioIndex.has(audioIdFor(entry)) ? 1 : 0),
+        0
+      );
+      const hasAudioBacklog = completedAudioCount < audioEntries.length;
       const hasPendingAudio = audioEntries.some(
         (entry) => pendingAudioIds.has(audioIdFor(entry)) && !localAudioIndex.has(audioIdFor(entry))
       );
       if (hasPendingAudio) {
-        // A closed app is treated as paused; explicit resume prevents surprise downloads.
-        await setAudioDownloadPaused(true);
-        const completed = audioEntries.reduce(
-          (count, entry) => count + (localAudioIndex.has(audioIdFor(entry)) ? 1 : 0),
-          0
-        );
+        // Preserve only an explicit pause; otherwise let automatic downloads resume.
         setDownloadProgress({
-          phase: "paused",
-          current: completed,
+          phase: wasPaused ? "paused" : "audio",
+          current: completedAudioCount,
           total: audioEntries.length,
           currentWord: "",
+          resumable: hasArchiveProgress || completedAudioCount > 0,
         });
-      } else {
+      } else if (activeEntries.length > 0) {
         if (pendingIds.length > 0) await clearPendingQueue();
         if (wasPaused) {
           await setAudioDownloadPaused(false);
         }
       }
 
-      // Do not wait for connectivity checks: the bundled words are already visible.
-      void runSync(false).catch(() => undefined);
+      // Avoid refetching and rehashing 16k rows on every launch when the cached sync is still fresh.
+      const syncAgeMs = lastSyncDate ? Date.now() - lastSyncDate.getTime() : Number.POSITIVE_INFINITY;
+      const needsDictionarySync = !activeEntries.length || !Number.isFinite(syncAgeMs) || syncAgeMs >= SYNC_INTERVAL_MS;
+      const audioDownloadHasPriority = activeEntries.length > 0 && hasAudioBacklog;
+      if (needsDictionarySync && !audioDownloadHasPriority) {
+        void runSync(false).catch(() => undefined);
+      }
     };
 
     void initialize().catch(() => {
-      // The bundled in-memory seed remains available if local storage fails.
+      // The automatic sync can still populate the local dictionary when connectivity is available.
+      if (!cancelled) setIsLoading(false);
     });
 
     return () => {
@@ -435,6 +488,7 @@ export function useOfflineDictionary(): OfflineDictionary {
   // Poll the sheet while active; each successful refresh replaces local data atomically.
   useEffect(() => {
     const refreshIfDue = () => {
+      if (downloadingRef.current) return;
       const last = lastSyncRef.current;
       const due = !last || !Number.isFinite(last.getTime()) || Date.now() - last.getTime() >= SYNC_INTERVAL_MS;
       if (due) void runSync(false).catch(() => undefined);
@@ -467,14 +521,34 @@ export function useOfflineDictionary(): OfflineDictionary {
 
   // Calling the same action during a download pauses it. Completed files are checkpointed;
   // calling again after pause skips indexed files and resumes from the first missing one.
-  const startDownload = useCallback(async (opts?: { audioOnly?: boolean }) => {
+  const startDownload = useCallback(async (opts?: { audioOnly?: boolean; automatic?: boolean }) => {
     if (downloadingRef.current) {
       abortRef.current = true;
+      const archiveTask = archiveDownloadTaskRef.current;
+      if (archiveTask) await archiveTask.pauseAsync().catch(() => undefined);
       await setAudioDownloadPaused(true);
       while (downloadingRef.current) {
         await new Promise<void>((resolve) => setTimeout(resolve, 100));
       }
       return;
+    }
+
+    if (entriesRef.current.length === 0) {
+      try {
+        await runSync(true);
+      } catch {
+        // The progress state below reports that an online dictionary sync is required.
+      }
+      if (entriesRef.current.length === 0) {
+        publishProgress({
+          phase: "error",
+          current: 0,
+          total: 0,
+          currentWord: "",
+          errorMsg: "Connect to the internet once to download the dictionary for offline use.",
+        }, true);
+        return;
+      }
     }
 
     downloadingRef.current = true;
@@ -483,7 +557,7 @@ export function useOfflineDictionary(): OfflineDictionary {
     await setAudioDownloadPaused(false);
 
     try {
-      const allAudio = uniqueAudioEntries(entriesRef.current.length ? entriesRef.current : initialEntries);
+      const allAudio = uniqueAudioEntries(entriesRef.current);
       const allAudioIds = new Set(allAudio.map(audioIdFor));
       let currentIndex = new Set(
         [...await loadAudioIndex()].filter((id) => allAudioIds.has(id))
@@ -502,18 +576,170 @@ export function useOfflineDictionary(): OfflineDictionary {
         currentWord: "",
       }, true);
 
-      for (let offset = 0; offset < missing.length; offset += AUDIO_CHUNK_SIZE) {
+      let archiveFailureMessage: string | null = null;
+      // Restore the original per-audio-file download flow; never fetch the whole archive.
+      const canUseArchive = false;
+      if (canUseArchive && missing.length > 0) {
+        const archiveWeight = missing.length * 0.45;
+        try {
+          publishProgress({
+            phase: "audio",
+            current: currentIndex.size,
+            total,
+            currentWord: "",
+            stage: "archive",
+            overallProgress: total > 0 ? currentIndex.size / total : 0,
+          }, true);
+
+          const archive = await downloadAudioArchive({
+            shouldContinue: () => !abortRef.current,
+            onTask: (task) => { archiveDownloadTaskRef.current = task; },
+            onProgress: (bytesWritten, expectedBytes) => {
+              const progressTotal = expectedBytes > 0 ? expectedBytes : ARCHIVE_PROGRESS_FALLBACK_BYTES;
+              const fraction = Math.max(0, Math.min(1, bytesWritten / progressTotal));
+              const overallProgress = total > 0
+                ? Math.min(1, (completedAtStart + archiveWeight * fraction) / total)
+                : 0;
+              publishProgress({
+                phase: "audio",
+                current: currentIndex.size,
+                total,
+                currentWord: "",
+                stage: "archive",
+                overallProgress,
+                resumable: true,
+              });
+            },
+          });
+
+          if (archive.paused) {
+            const remaining = allAudio.filter((entry) => !currentIndex.has(audioIdFor(entry)));
+            await saveAudioIndex(currentIndex);
+            await savePendingQueue(remaining.map(audioIdFor));
+            audioIndexRef.current = new Set(currentIndex);
+            setAudioIndex(new Set(currentIndex));
+            await setAudioDownloadPaused(true);
+            publishProgress({
+              phase: "paused",
+              current: currentIndex.size,
+              total,
+              currentWord: "",
+              resumable: (await hasAudioArchiveToResume()) || currentIndex.size > 0,
+            }, true);
+            return;
+          }
+
+          if (archive.path) {
+            publishProgress({
+              phase: "audio",
+              current: currentIndex.size,
+              total,
+              currentWord: "",
+              stage: "extract",
+              overallProgress: total > 0 ? Math.min(1, (completedAtStart + archiveWeight) / total) : 0,
+            }, true);
+
+            const extraction = await extractAudioArchive(
+              archive.path,
+              missing.map((entry) => ({ audioId: audioIdFor(entry), audioUrl: entry.audioUrl! })),
+              {
+                shouldContinue: () => !abortRef.current,
+                onAudioSaved: async (audioId) => {
+                  currentIndex.add(audioId);
+                  const newlySaved = Math.max(0, currentIndex.size - completedAtStart);
+                  const extractionFraction = missing.length > 0 ? Math.min(1, newlySaved / missing.length) : 1;
+                  const overallProgress = total > 0
+                    ? Math.min(1, (completedAtStart + archiveWeight + (missing.length - archiveWeight) * extractionFraction) / total)
+                    : 1;
+                  publishProgress({
+                    phase: "audio",
+                    current: currentIndex.size,
+                    total,
+                    currentWord: "",
+                    stage: "extract",
+                    overallProgress,
+                  });
+                  if (currentIndex.size % AUDIO_CHUNK_SIZE === 0) {
+                    await saveAudioIndex(currentIndex);
+                    audioIndexRef.current = new Set(currentIndex);
+                    setAudioIndex(new Set(currentIndex));
+                  }
+                },
+              }
+            );
+
+            if (
+              extraction.savedAudioIds.size === 0 &&
+              missing.some((entry) => !!entry.audioUrl && !!getGithubAudioArchivePath(entry.audioUrl))
+            ) {
+              throw new Error("لم يعثر الأرشيف على ملفات تطابق روابط الصوت في الشيت.");
+            }
+
+            if (extraction.paused) {
+              const remaining = allAudio.filter((entry) => !currentIndex.has(audioIdFor(entry)));
+              await saveAudioIndex(currentIndex);
+              await savePendingQueue(remaining.map(audioIdFor));
+              audioIndexRef.current = new Set(currentIndex);
+              setAudioIndex(new Set(currentIndex));
+              await setAudioDownloadPaused(true);
+              publishProgress({
+                phase: "paused",
+                current: currentIndex.size,
+                total,
+                currentWord: "",
+                resumable: (await hasAudioArchiveToResume()) || currentIndex.size > 0,
+              }, true);
+              return;
+            }
+
+            await saveAudioIndex(currentIndex);
+            audioIndexRef.current = new Set(currentIndex);
+            setAudioIndex(new Set(currentIndex));
+            await discardAudioArchive();
+          }
+        } catch (error) {
+          archiveFailureMessage = error instanceof Error ? error.message : String(error);
+          console.warn("Audio archive download/extraction failed", error);
+          await saveAudioIndex(currentIndex).catch(() => undefined);
+          audioIndexRef.current = new Set(currentIndex);
+          setAudioIndex(new Set(currentIndex));
+          await discardAudioArchive().catch(() => undefined);
+        }
+      }
+
+      if (archiveFailureMessage && currentIndex.size === completedAtStart) {
+        const remaining = allAudio.filter((entry) => !currentIndex.has(audioIdFor(entry)));
+        await saveAudioIndex(currentIndex);
+        await savePendingQueue(remaining.map(audioIdFor));
+        await setAudioDownloadPaused(true);
+        publishProgress({
+          phase: "error",
+          current: currentIndex.size,
+          total,
+          currentWord: "",
+          stage: "archive",
+          errorMsg: `تعذر تنزيل حزمة الصوتيات: ${archiveFailureMessage}`,
+        }, true);
+        return;
+      }
+
+      const remainingBeforeIndividual = allAudio.filter((entry) => !currentIndex.has(audioIdFor(entry)));
+      for (let offset = 0; offset < remainingBeforeIndividual.length; offset += AUDIO_CHUNK_SIZE) {
         if (abortRef.current) break;
-        const chunk = missing.slice(offset, offset + AUDIO_CHUNK_SIZE);
+        const chunk = remainingBeforeIndividual.slice(offset, offset + AUDIO_CHUNK_SIZE);
         currentIndex = await downloadAudioBatch(
           chunk,
           currentIndex,
-          (downloadedCount) => publishProgress({
-            phase: "audio",
-            current: Math.min(total, downloadedCount),
-            total,
-            currentWord: "",
-          }),
+          (downloadedCount) => {
+            publishProgress({
+              phase: "audio",
+              current: Math.min(total, downloadedCount),
+              total,
+              currentWord: "",
+              stage: "individual",
+              overallProgress: total > 0 ? Math.min(1, downloadedCount / total) : 0,
+            });
+          },
           abortRef
         );
 
@@ -541,14 +767,26 @@ export function useOfflineDictionary(): OfflineDictionary {
 
       if (remaining.length > 0) {
         // Keep failed URLs in the persisted queue so the user can retry without redownloading successes.
-        await setAudioDownloadPaused(true);
-        publishProgress({
-          phase: "paused",
-          current: total - remaining.length,
-          total,
-          currentWord: "",
-          errorMsg: `${remaining.length} audio files remain and can be retried.`,
-        }, true);
+        if (opts?.automatic) {
+          await setAudioDownloadPaused(false);
+          autoDownloadAttemptedRef.current = false;
+          publishProgress({
+            phase: "error",
+            current: total - remaining.length,
+            total,
+            currentWord: "",
+            errorMsg: `${remaining.length} audio files remain; background retry is queued.`,
+          }, true);
+        } else {
+          await setAudioDownloadPaused(true);
+          publishProgress({
+            phase: "paused",
+            current: total - remaining.length,
+            total,
+            currentWord: "",
+            errorMsg: `${remaining.length} audio files remain and can be retried.`,
+          }, true);
+        }
         return;
       }
 
@@ -562,6 +800,10 @@ export function useOfflineDictionary(): OfflineDictionary {
       setIsOfflineReady(true);
       publishProgress({ phase: "done", current: total, total, currentWord: "" }, true);
     } catch (error) {
+      if (opts?.automatic) {
+        await setAudioDownloadPaused(false).catch(() => undefined);
+        autoDownloadAttemptedRef.current = false;
+      }
       publishProgress({
         phase: "error",
         current: 0,
@@ -573,7 +815,61 @@ export function useOfflineDictionary(): OfflineDictionary {
       downloadingRef.current = false;
     }
     if (!abortRef.current) void runPendingAudioUpdates(entriesRef.current).catch(() => undefined);
-  }, [publishProgress, runPendingAudioUpdates]);
+  }, [publishProgress, runPendingAudioUpdates, runSync]);
+
+  const startAutomaticAudioDownload = useCallback(async () => {
+    if (entries.length === 0 || entriesRef.current.length === 0 || downloadingRef.current || autoDownloadAttemptedRef.current) return;
+
+    const network = await NetInfo.fetch().catch(() => null);
+    if (network?.isConnected !== true || network.isInternetReachable === false) return;
+
+    const allAudio = uniqueAudioEntries(entriesRef.current);
+    if (allAudio.length === 0) {
+      autoDownloadAttemptedRef.current = true;
+      return;
+    }
+
+    const [wasPaused, storedIndex] = await Promise.all([getAudioDownloadPaused(), loadAudioIndex()]);
+    const currentIndex = new Set(storedIndex);
+    audioIndexRef.current = currentIndex;
+    setAudioIndex(new Set(currentIndex));
+    const completed = allAudio.reduce((count, entry) => count + (currentIndex.has(audioIdFor(entry)) ? 1 : 0), 0);
+    const missingCount = allAudio.length - completed;
+
+    if (missingCount === 0) {
+      autoDownloadAttemptedRef.current = true;
+      return;
+    }
+    if (wasPaused) {
+      autoDownloadAttemptedRef.current = true;
+      setDownloadProgress({ phase: "paused", current: completed, total: allAudio.length, currentWord: "" });
+      return;
+    }
+
+    autoDownloadAttemptedRef.current = true;
+    await startDownload({ automatic: true });
+  }, [entries, startDownload]);
+
+  useEffect(() => {
+    let active = true;
+    const tryStart = () => {
+      if (active) void startAutomaticAudioDownload().catch(() => {
+        autoDownloadAttemptedRef.current = false;
+      });
+    };
+    tryStart();
+    const unsubscribe = NetInfo.addEventListener((state) => {
+      if (state.isConnected === true && state.isInternetReachable !== false) tryStart();
+    });
+    const retryInterval = setInterval(() => {
+      if (!autoDownloadAttemptedRef.current) tryStart();
+    }, 60_000);
+    return () => {
+      active = false;
+      unsubscribe();
+      clearInterval(retryInterval);
+    };
+  }, [startAutomaticAudioDownload]);
 
   const sync = useCallback(() => runSync(true), [runSync]);
 
@@ -631,13 +927,6 @@ export function useOfflineDictionary(): OfflineDictionary {
   }, [runSync]);
 
   const skipSetup = useCallback(async () => {
-    if (entriesRef.current.length === 0) {
-      entriesRef.current = initialEntries;
-      signatureRef.current = await fingerprintEntries(initialEntries);
-      setEntries(initialEntries);
-      setIsOfflineReady(initialEntries.length > 0);
-      void saveEntries(initialEntries).catch(() => undefined);
-    }
     await markSetupDone().catch(() => undefined);
     setIsSetupDoneState(true);
   }, []);

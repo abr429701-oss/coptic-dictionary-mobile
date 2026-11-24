@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { ActivityIndicator, Text, TouchableOpacity, View, StyleSheet } from "react-native";
 import { Feather } from "@expo/vector-icons";
-import type { CloudflareAdminSession } from "@/components/CloudflareNotificationsPanel";
+import type { CloudflareAdminSession } from "@/lib/cloudflare";
 
 const API_BASE = "https://coptic-app-notifications.abraammerzik56.workers.dev";
 const GOLD = "#C8A951";

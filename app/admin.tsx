@@ -24,7 +24,10 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import { useAdmin } from "@/contexts/AdminContext";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { AdminLocalTools } from "@/components/AdminLocalTools";
-import { CloudflareNotificationsPanel, type CloudflareAdminSession } from "@/components/CloudflareNotificationsPanel";
+import { CloudflareNotificationsPanel } from "@/components/CloudflareNotificationsPanel";
+import { CloudflareUsefulBotsPanel } from "@/components/CloudflareUsefulBotsPanel";
+import { CloudflareRemoteControlPanel } from "@/components/CloudflareRemoteControlPanel";
+import { type CloudflareAdminSession } from "@/lib/cloudflare";
 import { CloudflareAdminReports } from "@/components/CloudflareAdminReports";
 
 const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbwDoXHYpnsJMXg5O6XOoU8SQBpjOCFXfEcP2uyYggITJYeR1sdRmBeOMDGMyIVC7JRv/exec";
@@ -577,6 +580,8 @@ export default function AdminScreen() {
                 session={cloudflareSession}
                 onSessionChange={setCloudflareSession}
               />
+              <CloudflareUsefulBotsPanel session={cloudflareSession} />
+              <CloudflareRemoteControlPanel session={cloudflareSession} />
             </View>
           )}
 

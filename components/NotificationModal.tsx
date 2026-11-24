@@ -1,17 +1,18 @@
 import React from 'react';
-import { StyleSheet, Text, View, Modal, TouchableOpacity, Dimensions } from 'react-native';
+import { StyleSheet, Text, View, Modal, TouchableOpacity, Dimensions, Image } from 'react-native';
 import { MaterialIcons } from '@expo/vector-icons';
 import { useTheme } from '@/contexts/ThemeContext';
 import { useLang } from '@/contexts/LanguageContext';
 
 interface NotificationModalProps {
-  notification: { body: string } | null;
+  notification: { body: string; title?: string; imageUrl?: string; notificationId?: string } | null;
   onClose: () => void;
+  onOpenImage?: (notification: { body: string; title?: string; imageUrl?: string; notificationId?: string }) => void;
 }
 
 const { width } = Dimensions.get('window');
 
-export function NotificationModal({ notification, onClose }: NotificationModalProps) {
+export function NotificationModal({ notification, onClose, onOpenImage }: NotificationModalProps) {
   const { isDark } = useTheme();
   const { t, isRTL, lang } = useLang();
 
@@ -27,7 +28,7 @@ export function NotificationModal({ notification, onClose }: NotificationModalPr
               <MaterialIcons name="close" size={24} color={isDark ? '#9CA3AF' : '#BBB'} />
             </TouchableOpacity>
             <View style={styles.headerContent}>
-              <Text style={[styles.title, { color: isDark ? '#F3F4F6' : '#333' }]}>{t.notification.new}</Text>
+              <Text style={[styles.title, { color: isDark ? '#F3F4F6' : '#333' }]}>{notification.title || t.notification.new}</Text>
               <View style={styles.bellCircle}>
                 <MaterialIcons name="notifications-none" size={30} color="#FFF" />
               </View>
@@ -36,6 +37,7 @@ export function NotificationModal({ notification, onClose }: NotificationModalPr
 
           {/* Body */}
           <View style={styles.body}>
+            {notification.imageUrl ? <Image source={{ uri: notification.imageUrl }} style={styles.image} resizeMode="cover" /> : null}
             <Text style={[styles.message, { 
               color: isDark ? '#D1D5DB' : '#444', 
               textAlign: isRTL ? 'right' : 'left' 
@@ -45,8 +47,15 @@ export function NotificationModal({ notification, onClose }: NotificationModalPr
           </View>
 
           {/* Action button */}
-          <TouchableOpacity style={styles.actionButton} onPress={onClose} activeOpacity={0.8}>
-            <Text style={styles.actionText}>{t.notification.ok}</Text>
+          <TouchableOpacity
+            style={styles.actionButton}
+            onPress={() => {
+              if (notification.imageUrl && onOpenImage) onOpenImage(notification);
+              onClose();
+            }}
+            activeOpacity={0.8}
+          >
+            <Text style={styles.actionText}>{notification.imageUrl ? (lang === 'ar' ? 'عرض الصورة والتفاصيل' : 'View image and details') : t.notification.ok}</Text>
           </TouchableOpacity>
         </View>
       </View>
@@ -102,6 +111,13 @@ const styles = StyleSheet.create({
     fontSize: 18,
     lineHeight: 28,
     width: '100%',
+  },
+  image: {
+    width: '100%',
+    height: 190,
+    borderRadius: 14,
+    marginBottom: 16,
+    backgroundColor: '#0F172A',
   },
   actionButton: {
     width: '100%',

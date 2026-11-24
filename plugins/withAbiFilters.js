@@ -1,10 +1,10 @@
-const { withAppBuildGradle } = require("@expo/config-plugins");
+const { withAppBuildGradle, withGradleProperties } = require("@expo/config-plugins");
 
 /**
  * Plugin to restrict Android build to specific ABIs and resolve native library conflicts.
  */
 module.exports = function withAbiFilters(config) {
-  return withAppBuildGradle(config, (config) => {
+  config = withAppBuildGradle(config, (config) => {
     let contents = config.modResults.contents;
 
     // 1. Add AbiFilters for 32-bit and 64-bit support
@@ -24,6 +24,20 @@ module.exports = function withAbiFilters(config) {
     }
 
     config.modResults.contents = contents;
+    return config;
+  });
+
+  return withGradleProperties(config, (config) => {
+    const properties = config.modResults;
+    const key = "android.enableBundleCompression";
+    const existing = properties.find((property) => property.type === "property" && property.key === key);
+
+    if (existing) {
+      existing.value = "true";
+    } else {
+      properties.push({ type: "property", key, value: "true" });
+    }
+
     return config;
   });
 };

@@ -15,6 +15,7 @@ CREATE TABLE IF NOT EXISTS notifications (
   id TEXT PRIMARY KEY,
   title TEXT NOT NULL,
   body TEXT NOT NULL,
+  image_url TEXT NOT NULL DEFAULT '',
   language TEXT NOT NULL DEFAULT 'all' CHECK (language IN ('ar', 'en', 'all')),
   scheduled_at INTEGER,
   status TEXT NOT NULL CHECK (status IN ('scheduled', 'sending', 'sent', 'partial', 'failed')),

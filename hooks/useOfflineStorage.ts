@@ -14,7 +14,7 @@ const KEYS = {
   LAST_SYNC: "@coptic/last_sync_v4",
   SETUP_DONE: "@coptic/setup_done_v4",
   PENDING_QUEUE: "@coptic/pending_audio_queue_v4",
-  AUDIO_PAUSED: "@coptic/audio_download_paused_v1",
+  AUDIO_PAUSED: "@coptic/audio_download_paused_v2",
   AUTO_AUDIO_UPDATES: "@coptic/auto_audio_updates_v1",
 };
 
@@ -49,7 +49,7 @@ export async function loadEntries(): Promise<DictionaryEntry[] | null> {
         if (Array.isArray(parsed) && parsed.length > 0) return parsed;
       }
     } catch {
-      // Fall back to AsyncStorage or the bundled seed if the cache file is corrupt.
+      // Fall back to AsyncStorage if the cache file is corrupt.
     }
   }
 
@@ -219,6 +219,48 @@ export async function ensureAudioDir(): Promise<void> {
     try {
       await FileSystem.makeDirectoryAsync(AUDIO_DIR, { intermediates: true });
     } catch { }
+  }
+}
+
+const BASE64_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+function bytesToBase64(bytes: Uint8Array): string {
+  let output = "";
+  for (let index = 0; index < bytes.length; index += 3) {
+    const first = bytes[index];
+    const hasSecond = index + 1 < bytes.length;
+    const hasThird = index + 2 < bytes.length;
+    const second = hasSecond ? bytes[index + 1] : 0;
+    const third = hasThird ? bytes[index + 2] : 0;
+    output += BASE64_ALPHABET[first >> 2];
+    output += BASE64_ALPHABET[((first & 3) << 4) | (second >> 4)];
+    output += hasSecond ? BASE64_ALPHABET[((second & 15) << 2) | (third >> 6)] : "=";
+    output += hasThird ? BASE64_ALPHABET[third & 63] : "=";
+  }
+  return output;
+}
+
+export async function saveAudioBytes(entryId: string, bytes: Uint8Array): Promise<boolean> {
+  if (Platform.OS === "web") return false;
+  const destination = getAudioLocalPath(entryId);
+  const temporaryPath = `${destination}.archive-tmp`;
+  try {
+    await ensureAudioDir();
+    if (await isValidMp3(destination)) return true;
+    await FileSystem.deleteAsync(temporaryPath, { idempotent: true });
+    await FileSystem.writeAsStringAsync(temporaryPath, bytesToBase64(bytes), {
+      encoding: FileSystem.EncodingType.Base64,
+    });
+    if (!(await isValidMp3(temporaryPath))) {
+      await FileSystem.deleteAsync(temporaryPath, { idempotent: true });
+      return false;
+    }
+    await FileSystem.deleteAsync(destination, { idempotent: true });
+    await FileSystem.moveAsync({ from: temporaryPath, to: destination });
+    return true;
+  } catch {
+    await FileSystem.deleteAsync(temporaryPath, { idempotent: true }).catch(() => undefined);
+    return false;
   }
 }
 

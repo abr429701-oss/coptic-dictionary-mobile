@@ -1,3 +1,16 @@
+// SplashAnimation.tsx — v20: زي v19 بس المدة 5 ثواني بدل 7.5 (كل التوقيتات × 2/3)
+// + إصلاح خطأ الـ LogBox: خط التوقيع بقى بـ scaleX بدل width (width مش مدعومة بالـ native driver)
+// (بطلب المستخدم 2026-11-18: "خلي الخلفية الفرعونية").
+// في فتحة اللوجو: خلفية غامقة زي الفيديو. في فتحة توت: خلفية فرعونية
+// باهتة بتظهر بالتدريج ورا كل حاجة.
+// المدة 5 ثواني. بديل مباشر لملف components/SplashAnimation.tsx.
+//  • في كل فتحة يظهر عنصر واحد فقط: Ⲁ أو الشعار أو قناع توت، بالتناوب
+//  • الخيارات الثلاثة تشترك في مساحة وحجم وتوقيت الحركة نفسها
+//  • 0.55s+: حروف ⲭⲏⲙⲓ واحد ورا التاني (0.09s بين كل حرف)
+//  • 1.3–1.63s: الخط الدهبي بيترسم تحت الاسم
+//  • 1.45–1.75s: COPTIC DICTIONARY بتظهر
+//  • 2.4–3.07s: التوقيع بيطلع من تحت (CRAFTED BY + Ebram Merzik)
+// المدة 5 ثواني. بديل مباشر لملف components/SplashAnimation.tsx.
 import React, { useEffect, useRef, useState } from "react";
 import {
   Animated,
@@ -8,16 +21,45 @@ import {
   Dimensions,
   Platform,
   Image,
+  useWindowDimensions,
 } from "react-native";
 import { Audio } from "expo-av";
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 const { width, height } = Dimensions.get("window");
 
 const GOLD = "#C8A951";
 const GOLD_L = "#F0D878";
-const GOLD_DIM = "rgba(200,169,81,0.35)";
 const BG = "#070202";
+
+// توقيت الفتحة بالمللي ثانية — نفس فيديو v12
+const T = {
+  centerStart: 0, // ألفا والشعار وقناع توت يبدأون معًا
+  centerDur: 533,
+  lettersStart: 550,
+  letterStep: 90,
+  letterDur: 230,
+  lineStart: 1300,
+  lineDur: 333,
+  subStart: 1450,
+  subDur: 300,
+  sigStart: 2400,
+  sigDur: 667,
+  nameStart: 2600,
+  nameDur: 667,
+  total: 5000,
+};
+
+// مقاسات متناسبة مع عرض الشاشة — نفس نسب فيديو v12 (1080×1920)
+const LOGO_SIZE = Math.round(width * 0.278); // اللوجو 300 من 1080
+const WORD_SIZE = Math.min(Math.round(width * 0.139), 60); // حروف الاسم 150 من 1080
+const LETTER_GAP = Math.round(width * 0.007);
+const LETTER_RISE = Math.round(width * 0.015); // طلوع الحروف 16 من 1080
+const GAP = Math.round(width * 0.079); // المسافة بين اللوجو والاسم
+const SUB_SIZE = Math.min(Math.round(width * 0.03), 14);
+const ALPHA_SIZE = LOGO_SIZE;
+const WORD = ["Ⲭ", "ⲏ", "ⲙ", "ⲓ"];
 
 /* ─── صوت الويب — ناقوس كنسي احترافي ────────────────────── */
 function playWebChime() {
@@ -43,7 +85,7 @@ function playWebChime() {
       env.gain.exponentialRampToValueAtTime(gain * 0.3, startTime + 0.3);
       env.gain.exponentialRampToValueAtTime(0.0001, startTime + decay);
       osc.start(startTime); osc.stop(startTime + decay);
-      osc2.start(startTime); osc2.stop(startTime + decay);
+      osc2.start(startTime); osc.stop(startTime + decay);
     }
 
     const t = ctx.currentTime;
@@ -59,56 +101,50 @@ function playWebChime() {
   } catch (_) { }
 }
 
-/* ─── حرف ملفوف حول دائرة ────────────────────────────────── */
-interface ArcLetterProps {
-  char: string;
-  angle: number;
-  radius: number;
-  fontSize: number;
-  color: string;
-  opacity: Animated.Value;
-}
-function ArcLetter({ char, angle, radius, fontSize, color, opacity }: ArcLetterProps) {
-  const rad = (angle * Math.PI) / 180;
-  const x = Math.cos(rad) * radius;
-  const y = Math.sin(rad) * radius;
-  // الدوران يجعل كل حرف يواجه الخارج (باتجاه من المركز)
-  const rotateDeg = `${angle + 90}deg`;
-  return (
-    <Animated.Text
-      style={{
-        position: "absolute",
-        fontSize,
-        fontFamily: "Inter_600SemiBold",
-        color,
-        opacity,
-        letterSpacing: 0,
-        transform: [
-          { translateX: x - fontSize * 0.3 },
-          { translateY: y - fontSize * 0.55 },
-          { rotate: rotateDeg },
-        ],
-      }}
-    >
-      {char}
-    </Animated.Text>
-  );
-}
-
 interface Props { onFinish: () => void }
 
-// علم عالمي لضمان تشغيل الصوت مرة واحدة فقط في الجلسة الواحدة (يمنع الازدواج في وضع التطوير)
+// علم عالمي لضمان تشغيل الصوت مرة واحدة فقط في الجلسة الواحدة
 let introSoundStarted = false;
 
 export function SplashAnimation({ onFinish }: Props) {
-  const [splashMode, setSplashMode] = useState<'original' | 'tut' | 'logo'>('original');
+  const viewport = useWindowDimensions();
+  const safeInsets = useSafeAreaInsets();
+  const estimatedLockupWidth = LOGO_SIZE + GAP + WORD_SIZE * 3.35;
+  const availableWidth = Math.max(1, viewport.width - 32);
+  const availableHeight = Math.max(1, viewport.height - safeInsets.top - safeInsets.bottom - 120);
+  const lockupScale = Math.max(0.65, Math.min(1, availableWidth / estimatedLockupWidth, availableHeight / Math.max(LOGO_SIZE, 1)));
+
+  const [splashMode, setSplashMode] = useState<'alpha' | 'logo' | 'tut'>('logo');
+  const [modeReady, setModeReady] = useState(false);
   const [audioFinished, setAudioFinished] = useState(false);
   const [minimumDisplayElapsed, setMinimumDisplayElapsed] = useState(false);
+  const [wordW, setWordW] = useState(0);
   const soundRef = useRef<Audio.Sound | null>(null);
   const onFinishRef = useRef(onFinish);
   onFinishRef.current = onFinish;
 
-  /* ── تشغيل الصوت ─────────────────────────────────────── */
+  useEffect(() => {
+    let mounted = true;
+    (async () => {
+      try {
+        const lastMode = await AsyncStorage.getItem("@splash_config_mode");
+        const nextMode = lastMode === "logo" ? "tut" : lastMode === "tut" ? "alpha" : "logo";
+        await AsyncStorage.setItem("@splash_config_mode", nextMode);
+        if (mounted) {
+          setSplashMode(nextMode);
+          setModeReady(true);
+        }
+      } catch {
+        if (mounted) {
+          setSplashMode("logo");
+          setModeReady(true);
+        }
+      }
+    })();
+    return () => { mounted = false; };
+  }, []);
+
+  /* ── تشغيل الصوت (نفس الكود الحالي) ─────────────────── */
   useEffect(() => {
     let mounted = true;
     let audioSafetyTimer: ReturnType<typeof setTimeout> | undefined;
@@ -133,7 +169,6 @@ export function SplashAnimation({ onFinish }: Props) {
           if (mounted) setAudioFinished(true);
         }, 15000);
 
-        // إعداد جلسة الصوت — iOS + Android
         await Audio.setAudioModeAsync({
           allowsRecordingIOS: false,
           playsInSilentModeIOS: true,
@@ -142,7 +177,6 @@ export function SplashAnimation({ onFinish }: Props) {
           playThroughEarpieceAndroid: false,
         });
 
-        // تأخير قصير على الأندرويد لضمان جاهزية نظام الصوت
         if (Platform.OS === "android") {
           await new Promise((r) => setTimeout(r, 300));
         }
@@ -175,52 +209,62 @@ export function SplashAnimation({ onFinish }: Props) {
     };
   }, []);
 
-  /* ─── ثوابت الشعار ──────────────────────────────────── */
-  const CIRCLE_R = Math.min(width * 0.22, 90);   // أكبر
-  const ARC_R = CIRCLE_R + 26;
-  const ARC_FONT = Math.min(width * 0.030, 12);
-
-  /* النص الملفوف — LTR من اليسار لليمين */
-  const topText = "COPTIC DICTIONARY";
-  const topChars = [...topText];
-  const topSpan = 172;
-  const topStart = -90 - topSpan / 2; // نقطة البداية (يسار)
-
   /* ─── قيم الأنيميشن ─────────────────────────────────── */
-  const screenOp = useRef(new Animated.Value(1)).current;
   const exitOp = useRef(new Animated.Value(1)).current;
-  const circleSc = useRef(new Animated.Value(1)).current;
-  const circleOp = useRef(new Animated.Value(1)).current;
-  const letterSc = useRef(new Animated.Value(1)).current;
-  const letterOp = useRef(new Animated.Value(1)).current;
-  const pulse = useRef(new Animated.Value(1)).current;
-  const lineW = useRef(new Animated.Value(1)).current;
-  const lineOp = useRef(new Animated.Value(1)).current;
-  const sigOp = useRef(new Animated.Value(1)).current;
-  const sigY = useRef(new Animated.Value(0)).current;
-  const nameOp = useRef(new Animated.Value(1)).current;
-  const nameY = useRef(new Animated.Value(0)).current;
+  const centerOp = useRef(new Animated.Value(0)).current;
+  const centerSc = useRef(new Animated.Value(0.92)).current;
+  const shineProgress = useRef(new Animated.Value(0)).current;
+  const pharOp = useRef(new Animated.Value(0)).current;
+  const lineTx = useRef(new Animated.Value(0)).current;
+  const subOp = useRef(new Animated.Value(0)).current;
+  const sigOp = useRef(new Animated.Value(0)).current;
+  const sigY = useRef(new Animated.Value(70)).current;
+  const nameOp = useRef(new Animated.Value(0)).current;
+  const nameY = useRef(new Animated.Value(70)).current;
+  const letters = useRef(WORD.map(() => ({
+    op: new Animated.Value(0),
+    y: new Animated.Value(LETTER_RISE),
+  }))).current;
 
-  const topOpacities = useRef(topChars.map(() => new Animated.Value(1))).current;
+  const isAlpha = splashMode === "alpha";
+  const isLogo = splashMode === "logo";
+  const isTut = splashMode === "tut";
 
+  /* ─── تشغيل تسلسل الفتحة — عنصر واحد فقط في كل تشغيل ─ */
   useEffect(() => {
-    let mounted = true;
-    (async () => {
-      // التناوب بين الحرف القبطي وتوت عنخ آمون وشعار القاموس
-      try {
-        const lastMode = await AsyncStorage.getItem("@splash_config_mode");
-        const nextMode = lastMode === "original" ? "tut" : lastMode === "tut" ? "logo" : "original";
-        await AsyncStorage.setItem("@splash_config_mode", nextMode);
-        if (mounted) setSplashMode(nextMode);
-      } catch {
-        if (mounted) setSplashMode("original");
-      }
-    })();
-    return () => { mounted = false; };
-  }, []);
+    if (!modeReady) return;
+    const rest = Animated.parallel([
+      Animated.timing(pharOp, { toValue: isTut ? 0.15 : 0, duration: 1000, delay: 0, easing: Easing.out(Easing.cubic), useNativeDriver: true }),
+      // لكل خيار زمن البداية والحجم والحركة نفسها.
+      Animated.timing(centerOp, { toValue: 1, duration: T.centerDur, delay: T.centerStart, easing: Easing.out(Easing.cubic), useNativeDriver: true }),
+      Animated.spring(centerSc, { toValue: 1, tension: 60, friction: 9, delay: T.centerStart, useNativeDriver: true }),
+      // لمعة واحدة تمر على العنصر المختار بعد ظهوره، من دون تكرار.
+      Animated.timing(shineProgress, { toValue: 1, duration: 220, delay: T.centerDur + 180, easing: Easing.inOut(Easing.cubic), useNativeDriver: true }),
+      // الخط الدهبي تحت الاسم (بيترسم من الشمال لليمين)
+      Animated.timing(lineTx, { toValue: 1, duration: T.lineDur, delay: T.lineStart, easing: Easing.out(Easing.cubic), useNativeDriver: true }),
+      // COPTIC DICTIONARY
+      Animated.timing(subOp, { toValue: 1, duration: T.subDur, delay: T.subStart, easing: Easing.out(Easing.cubic), useNativeDriver: true }),
+      // التوقيع بيطلع من تحت
+      Animated.timing(sigOp, { toValue: 1, duration: T.sigDur, delay: T.sigStart, easing: Easing.out(Easing.cubic), useNativeDriver: true }),
+      Animated.timing(sigY, { toValue: 0, duration: T.sigDur, delay: T.sigStart, easing: Easing.out(Easing.cubic), useNativeDriver: true }),
+      Animated.timing(nameOp, { toValue: 1, duration: T.nameDur, delay: T.nameStart, easing: Easing.out(Easing.cubic), useNativeDriver: true }),
+      Animated.timing(nameY, { toValue: 0, duration: T.nameDur, delay: T.nameStart, easing: Easing.out(Easing.cubic), useNativeDriver: true }),
+      // حروف الاسم واحد ورا التاني — بتطلع لفوق وتظهر
+      ...letters.map((l, i) =>
+        Animated.parallel([
+          Animated.timing(l.op, { toValue: 1, duration: T.letterDur, delay: T.lettersStart + i * T.letterStep, easing: Easing.out(Easing.cubic), useNativeDriver: true }),
+          Animated.timing(l.y, { toValue: 0, duration: T.letterDur, delay: T.lettersStart + i * T.letterStep, easing: Easing.out(Easing.cubic), useNativeDriver: true }),
+        ])
+      ),
+    ]);
 
+    rest.start();
+    return () => rest.stop();
+  }, [modeReady, isTut]);
+
+  // أقل مدة عرض = مدة التسلسل الكاملة (5 ثواني)
   useEffect(() => {
-    const minimumTimer = setTimeout(() => setMinimumDisplayElapsed(true), 4800);
+    const minimumTimer = setTimeout(() => setMinimumDisplayElapsed(true), T.total);
     return () => clearTimeout(minimumTimer);
   }, []);
 
@@ -238,104 +282,79 @@ export function SplashAnimation({ onFinish }: Props) {
     return () => animation.stop();
   }, [audioFinished, minimumDisplayElapsed, exitOp]);
 
-  /* ─── زاوية كل حرف — LTR ────────────────────────────── */
-  function topAngle(i: number) {
-    const pct = topChars.length > 1 ? i / (topChars.length - 1) : 0;
-    return topStart + pct * topSpan; // من اليسار إلى اليمين
-  }
+  const shineX = shineProgress.interpolate({ inputRange: [0, 1], outputRange: [-LOGO_SIZE * 0.3, LOGO_SIZE * 0.3] });
+  const shineOpacity = shineProgress.interpolate({ inputRange: [0, 0.12, 0.82, 1], outputRange: [0, 0.8, 0.72, 0] });
 
-  const logoSize = CIRCLE_R * 2;
+  // الخط بيترسم من الشمال لليمين (من برّه الدايرة لحد مكانها)
+  const lineX = lineTx.interpolate({ inputRange: [0, 1], outputRange: [-Math.max(wordW, LOGO_SIZE), 0] });
+  // خط التوقيع بيكبر من النص لبرّه — بـ scaleX (مش width، لأن width
+  // خاصية layout والـ native animated module مابيدعمهاش)
 
   return (
-    <Animated.View style={[styles.root, { opacity: screenOp }]}>
-      <Animated.View style={[styles.root, { opacity: exitOp }]}>
-        
-        {/* خلفية الرموز الفرعونية لمود توت */}
-        {splashMode === "tut" && (
-          <Animated.Image
-            source={require("@/assets/images/pharaonic_bg_transparent.png")}
-            style={[StyleSheet.absoluteFill, { width, height, opacity: Animated.multiply(circleOp, 0.15) as any }]}
-            resizeMode="cover"
-          />
-        )}
+    <Animated.View style={[styles.root, { opacity: exitOp }]}>
 
-        {/* ── المنتصف: العنصر المتناوب ── */}
-        <View style={styles.center}>
-          {/* منطقة العنصر المركزي والنص الملفوف، وتظهر في الأوضاع الثلاثة */}
-          <Animated.View style={{
-            width: ARC_R * 2 + ARC_FONT * 2 + 12,
-            height: ARC_R * 2 + ARC_FONT * 2 + 12,
-            alignItems: "center",
-            justifyContent: "center",
-            opacity: circleOp,
-            transform: [{ scale: Animated.multiply(circleSc, pulse) as any }],
-          }}>
+      {isTut && (
+        <Animated.Image
+          source={require("@/assets/images/pharaonic_bg_transparent.png")}
+          style={[StyleSheet.absoluteFill, { width, height, opacity: pharOp }]}
+          resizeMode="cover"
+        />
+      )}
 
-            {splashMode === "logo" ? (
-              /* شعار القاموس يظهر وحده كمرحلة مستقلة في التناوب */
-              <Image
-                source={require("@/assets/images/logo22.png")}
-                style={{ width: width * 0.34, height: width * 0.34, resizeMode: "contain", zIndex: 2 }}
-              />
-            ) : splashMode === "tut" ? (
-              /* مود توت: القناع الذهبي في المنتصف */
-              <Image
-                source={require("@/assets/images/tut_mask_transparent.png")}
-                style={{ width: width * 0.32, height: width * 0.32, resizeMode: "contain", zIndex: 2 }}
-              />
+      {/* عنصر واحد في كل فتحة: ألفا، ثم الشعار، ثم قناع توت بالتناوب */}
+      <View style={[styles.lockup, { transform: [{ scale: lockupScale }] }]}> 
+
+        <View style={styles.centerWrap}>
+          <Animated.View style={[styles.centerVisual, { opacity: centerOp, transform: [{ scale: centerSc }] }]}> 
+            {isAlpha ? (
+              <Text style={styles.alphaLetter}>Ⲁ</Text>
             ) : (
-              /* المود الأصلي: الحرف القبطي */
-              <View style={[styles.circle, {
-                width: logoSize,
-                height: logoSize,
-                borderRadius: CIRCLE_R,
-              }]}>
-                <Animated.Text style={[
-                  styles.innerLetter,
-                  {
-                    fontSize: CIRCLE_R * 1.05,
-                    opacity: letterOp,
-                    transform: [{ scale: letterSc }],
-                  },
-                ]}>
-                  Ⲁ
-                </Animated.Text>
-              </View>
-            )}
-
-            {/* الحروف الملفوفة تظهر حول كل وضع من أوضاع الافتتاح */}
-            {topChars.map((char, i) => (
-              <ArcLetter
-                key={`t${i}`}
-                char={char}
-                angle={topAngle(i)}
-                radius={ARC_R}
-                fontSize={ARC_FONT}
-                color={GOLD}
-                opacity={topOpacities[i]}
+              <Image
+                source={isLogo ? require("@/assets/images/logo22.png") : require("@/assets/images/tut_mask_transparent.png")}
+                style={styles.centerImgInner}
               />
-            ))}
+            )}
+            <Animated.View pointerEvents="none" style={[styles.shineClip, { opacity: shineOpacity }]}>
+              <Animated.View style={[styles.shineBeam, { transform: [{ translateX: shineX }, { rotate: "24deg" }] }]}>
+                <View style={styles.shineCore} />
+              </Animated.View>
+            </Animated.View>
           </Animated.View>
-
-          {/* اسم القاموس بالحروف القبطية */}
-          <Animated.View style={{ opacity: nameOp, transform: [{ translateY: nameY }], marginTop: 22 }}>
-            <Text style={styles.copticName}>ⲭⲏⲙⲓ</Text>
-          </Animated.View>
-
-          {/* خط فاصل */}
-          <Animated.View style={[styles.divider, { width: 120, transform: [{ scaleX: lineW }], opacity: lineOp, marginTop: 16 }]} />
         </View>
 
-        {/* ── التوقيع — أسفل الشاشة ── */}
-        <Animated.View style={[
-          styles.sigBlock,
-          { opacity: sigOp, transform: [{ translateY: sigY }] },
-        ]}>
-          <Text style={styles.sigLabel}>CRAFTED BY</Text>
-          <Text style={styles.sigName}>Ebram Merzik</Text>
-        </Animated.View>
+        {/* الاسم */}
+        <View style={styles.wordBlock}>
+          <View style={styles.wordRow} onLayout={(e) => setWordW(e.nativeEvent.layout.width)}>
+            {letters.map((l, i) => (
+              <Animated.Text
+                key={i}
+                style={[styles.wordLetter, { opacity: l.op, transform: [{ translateY: l.y }], marginRight: i < WORD.length - 1 ? LETTER_GAP : 0 }]}
+              >
+                {WORD[i]}
+              </Animated.Text>
+            ))}
+          </View>
+          <View style={styles.lineWrap}>
+            <Animated.View style={[styles.lineInner, { opacity: lineTx, transform: [{ translateX: lineX }] }]} />
+          </View>
+          <Animated.Text
+            style={[styles.sub, { opacity: subOp, width: wordW, fontSize: Math.min(17, Math.max(15, SUB_SIZE + 2)) }]}
+            numberOfLines={1}
+            adjustsFontSizeToFit
+          >
+            COPTIC DICTIONARY
+          </Animated.Text>
+        </View>
+      </View>
 
+      {/* التوقيع — أسفل الشاشة */}
+      <Animated.View style={[styles.sigBlock, { bottom: Math.max(44, safeInsets.bottom + 20), opacity: sigOp, transform: [{ translateY: sigY }] }]}>
+        <Text style={styles.sigLabel}>CRAFTED BY</Text>
+        <Animated.Text style={[styles.sigName, { opacity: nameOp, transform: [{ translateY: nameY }] }]}>
+          Ebram Merzik
+        </Animated.Text>
       </Animated.View>
+
     </Animated.View>
   );
 }
@@ -346,49 +365,98 @@ const styles = StyleSheet.create({
     backgroundColor: BG,
     zIndex: 9999,
     elevation: 9999,
-  },
-  center: {
-    flex: 1,
     alignItems: "center",
     justifyContent: "center",
+    // الموبايل عربي (RTL) فبيقلب كل صف — نفرض LTR عشان يطابق الفيديو
+    direction: "ltr",
+    overflow: "hidden",
   },
-
-  glow: {
-    position: "absolute",
-    backgroundColor: "rgba(139,0,0,0.14)",
-    shadowColor: GOLD,
-    shadowOffset: { width: 0, height: 0 },
-    shadowOpacity: 0.2,
-    shadowRadius: 60,
-  },
-
-  circle: {
-    borderWidth: 0,
-    backgroundColor: "transparent",
-    alignItems: "center",
-    justifyContent: "center",
-  },
-
-  innerLetter: {
+  alphaLetter: {
     fontFamily: "CSAvaVeni-Regular",
+    fontSize: ALPHA_SIZE,
     color: GOLD_L,
-    lineHeight: undefined,
-    includeFontPadding: false,
+    textShadowColor: "rgba(240,216,120,0.45)",
+    textShadowRadius: 24,
+    textShadowOffset: { width: 0, height: 0 },
   },
-
-  copticName: {
-    fontSize: 45,
+  lockup: {
+    flexDirection: "row",
+    alignItems: "center",
+    direction: "ltr",
+  },
+  centerWrap: {
+    width: LOGO_SIZE,
+    height: LOGO_SIZE,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  centerVisual: {
+    width: LOGO_SIZE,
+    height: LOGO_SIZE,
+    alignItems: "center",
+    justifyContent: "center",
+    overflow: "hidden",
+  },
+  shineClip: {
+    ...StyleSheet.absoluteFillObject,
+    overflow: "hidden",
+  },
+  shineBeam: {
+    position: "absolute",
+    top: LOGO_SIZE * 0.225,
+    left: LOGO_SIZE * 0.45,
+    width: LOGO_SIZE * 0.10,
+    height: LOGO_SIZE * 0.55,
+    borderRadius: LOGO_SIZE * 0.05,
+    backgroundColor: "rgba(240,216,120,0.22)",
+    alignItems: "center",
+  },
+  shineCore: {
+    width: 2,
+    height: "100%",
+    backgroundColor: "rgba(255,255,238,0.68)",
+  },
+  centerImgInner: {
+    width: LOGO_SIZE,
+    height: LOGO_SIZE,
+    resizeMode: "contain",
+  },
+  wordBlock: {
+    marginLeft: GAP,
+    alignItems: "flex-start",
+  },
+  wordRow: {
+    flexDirection: "row",
+    direction: "ltr",
+  },
+  wordLetter: {
     fontFamily: "CSAvaVeni-Regular",
-    color: GOLD,
+    fontSize: WORD_SIZE,
+    color: GOLD_L,
+    lineHeight: WORD_SIZE * 1.15,
+    textShadowColor: "rgba(200,169,81,0.35)",
+    textShadowRadius: 12,
+    textShadowOffset: { width: 0, height: 0 },
   },
-  divider: {
-    height: 1,
+  lineWrap: {
+    height: 3,
+    marginTop: 10,
+    overflow: "hidden",
+    alignSelf: "stretch",
+  },
+  lineInner: {
+    height: 3,
+    width: "100%",
     backgroundColor: GOLD,
-    opacity: 0.4,
-    borderRadius: 1,
   },
-
-  /* التوقيع في أسفل الشاشة */
+  sub: {
+    marginTop: 8,
+    fontSize: SUB_SIZE,
+    fontFamily: "Inter_600SemiBold",
+    color: "#C4BAA6",
+    letterSpacing: 1.5,
+    textAlign: "center",
+  },
   sigBlock: {
     position: "absolute",
     bottom: 44,

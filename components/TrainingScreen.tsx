@@ -26,6 +26,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { useTheme } from "@/contexts/ThemeContext";
 import { useThemeColors } from "@/hooks/useThemeColors";
 import { useLang } from "@/contexts/LanguageContext";
+import { useAppConfig } from "@/contexts/AppConfigContext";
 import type { DictionaryEntry } from "@/hooks/useDictionary";
 import { Alert, Dimensions } from "react-native";
 import { logActivity } from "@/hooks/useUserTracking";
@@ -127,6 +128,9 @@ export function TrainingScreen({
   const { isDark } = useTheme();
   const colors = useThemeColors();
   const { t, isRTL, lang } = useLang();
+  const { remoteSettings } = useAppConfig();
+  const remoteControls = remoteSettings.controls;
+  const buttonLabel = (key: keyof typeof remoteSettings.labels, fallback: string) => remoteSettings.labels[key]?.trim() || fallback;
 
   const triggerHaptic = (style: Haptics.ImpactFeedbackStyle = Haptics.ImpactFeedbackStyle.Light) => {
     if (Platform.OS !== 'web') Haptics.impactAsync(style);
@@ -461,6 +465,7 @@ export function TrainingScreen({
         >
           {trainingMode === "choice" ? (
           <View style={styles.choiceContainer}>
+            {remoteControls.training_listening && (
             <TouchableOpacity
               style={styles.choiceCard}
               onPress={() => { triggerHaptic(); setTrainingMode("listening"); }}
@@ -470,12 +475,14 @@ export function TrainingScreen({
                   <Feather name="headphones" size={24} color="#C8A951" />
                 </View>
                 <View style={styles.choiceTextWrap}>
-                  <Text style={[styles.choiceTitle, { color: textColor, textAlign: 'center' }]} numberOfLines={2}>{t.training.listeningTitle}</Text>
+                  <Text style={[styles.choiceTitle, { color: textColor, textAlign: 'center' }]} numberOfLines={2}>{buttonLabel("button_training_listening", t.training.listeningTitle)}</Text>
                   <Text style={[styles.choiceSub, { color: isDark ? 'rgba(255,255,255,0.5)' : 'rgba(0,0,0,0.5)', textAlign: 'center' }]} numberOfLines={2}>{t.training.listeningSub}</Text>
                 </View>
               </LinearGradient>
             </TouchableOpacity>
+            )}
 
+            {remoteControls.training_handwriting && (
             <TouchableOpacity
               style={styles.choiceCard}
               onPress={() => { triggerHaptic(); setTrainingMode("handwriting"); }}
@@ -485,12 +492,14 @@ export function TrainingScreen({
                   <Feather name="edit-3" size={24} color="#C8A951" />
                 </View>
                 <View style={styles.choiceTextWrap}>
-                  <Text style={[styles.choiceTitle, { color: textColor, textAlign: 'center' }]} numberOfLines={2}>{t.training.handwritingTitle}</Text>
+                  <Text style={[styles.choiceTitle, { color: textColor, textAlign: 'center' }]} numberOfLines={2}>{buttonLabel("button_training_handwriting", t.training.handwritingTitle)}</Text>
                   <Text style={[styles.choiceSub, { color: isDark ? 'rgba(255,255,255,0.5)' : 'rgba(0,0,0,0.5)', textAlign: 'center' }]} numberOfLines={2}>{t.training.handwritingSub}</Text>
                 </View>
               </LinearGradient>
             </TouchableOpacity>
+            )}
 
+            {remoteControls.training_grammar_quiz && (
             <TouchableOpacity
               style={styles.choiceCard}
               onPress={() => { triggerHaptic(); setTrainingMode("grammar_quiz"); }}
@@ -500,12 +509,14 @@ export function TrainingScreen({
                   <Feather name="help-circle" size={24} color="#C8A951" />
                 </View>
                 <View style={styles.choiceTextWrap}>
-                  <Text style={[styles.choiceTitle, { color: textColor, textAlign: 'center' }]} numberOfLines={2}>{t.menu.grammar_quiz || "تدريب القواعد"}</Text>
+                  <Text style={[styles.choiceTitle, { color: textColor, textAlign: 'center' }]} numberOfLines={2}>{buttonLabel("button_training_grammar_quiz", t.menu.grammar_quiz || "تدريب القواعد")}</Text>
                   <Text style={[styles.choiceSub, { color: isDark ? 'rgba(255,255,255,0.5)' : 'rgba(0,0,0,0.5)', textAlign: 'center' }]} numberOfLines={2}>{lang === 'ar' ? "اختبر معلوماتك النحوية" : "Test your grammar knowledge"}</Text>
                 </View>
               </LinearGradient>
             </TouchableOpacity>
+            )}
 
+            {remoteControls.training_word_scramble && (
             <TouchableOpacity
               style={styles.choiceCard}
               onPress={() => { triggerHaptic(); setTrainingMode("word_scramble"); }}
@@ -515,12 +526,14 @@ export function TrainingScreen({
                   <Feather name="shuffle" size={24} color="#C8A951" />
                 </View>
                 <View style={styles.choiceTextWrap}>
-                  <Text style={[styles.choiceTitle, { color: textColor, textAlign: 'center' }]} numberOfLines={2}>{t.menu.word_scramble || "ترتيب الحروف"}</Text>
+                  <Text style={[styles.choiceTitle, { color: textColor, textAlign: 'center' }]} numberOfLines={2}>{buttonLabel("button_training_word_scramble", t.menu.word_scramble || "ترتيب الحروف")}</Text>
                   <Text style={[styles.choiceSub, { color: isDark ? 'rgba(255,255,255,0.5)' : 'rgba(0,0,0,0.5)', textAlign: 'center' }]} numberOfLines={2}>{lang === 'ar' ? "رتب الحروف لتكوين الكلمات" : "Arrange letters to form words"}</Text>
                 </View>
               </LinearGradient>
             </TouchableOpacity>
+            )}
 
+            {remoteControls.training_matching && (
             <TouchableOpacity
               style={styles.choiceCard}
               onPress={() => { triggerHaptic(); setTrainingMode("matching_game"); }}
@@ -530,12 +543,14 @@ export function TrainingScreen({
                   <Feather name="link" size={24} color="#C8A951" />
                 </View>
                 <View style={styles.choiceTextWrap}>
-                  <Text style={[styles.choiceTitle, { color: textColor, textAlign: 'center' }]} numberOfLines={2}>{t.menu.matching_game || "توصيل الكلمات"}</Text>
+                  <Text style={[styles.choiceTitle, { color: textColor, textAlign: 'center' }]} numberOfLines={2}>{buttonLabel("button_training_matching", t.menu.matching_game || "توصيل الكلمات")}</Text>
                   <Text style={[styles.choiceSub, { color: isDark ? 'rgba(255,255,255,0.5)' : 'rgba(0,0,0,0.5)', textAlign: 'center' }]} numberOfLines={2}>{lang === 'ar' ? "قم بتوصيل الكلمة بمعناها" : "Match words with meanings"}</Text>
                 </View>
               </LinearGradient>
             </TouchableOpacity>
+            )}
 
+            {remoteControls.training_stats && (
             <TouchableOpacity
               style={styles.choiceCard}
               onPress={() => { triggerHaptic(); setShowHandwritingStats(true); }}
@@ -545,11 +560,12 @@ export function TrainingScreen({
                   <Feather name="bar-chart-2" size={24} color="#C8A951" />
                 </View>
                 <View style={styles.choiceTextWrap}>
-                  <Text style={[styles.choiceTitle, { color: textColor, textAlign: 'center' }]} numberOfLines={2}>{lang === 'ar' ? 'إحصائيات الكتابة' : 'Writing Stats'}</Text>
+                  <Text style={[styles.choiceTitle, { color: textColor, textAlign: 'center' }]} numberOfLines={2}>{buttonLabel("button_training_stats", lang === 'ar' ? 'إحصائيات الكتابة' : 'Writing Stats')}</Text>
                   <Text style={[styles.choiceSub, { color: isDark ? 'rgba(255,255,255,0.5)' : 'rgba(0,0,0,0.5)', textAlign: 'center' }]} numberOfLines={2}>{lang === 'ar' ? 'تتبع تحسنك في رسم الحروف' : 'Track your handwriting progress'}</Text>
                 </View>
               </LinearGradient>
             </TouchableOpacity>
+            )}
           </View>
         ) : trainingMode === "listening" ? (
           <>

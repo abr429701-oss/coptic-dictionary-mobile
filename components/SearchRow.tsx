@@ -22,6 +22,10 @@ interface SearchRowProps {
   onFilterPress: () => void;
   showCoptic: boolean;
   onToggleCoptic: () => void;
+  showFilterButton?: boolean;
+  showCopticKeyboard?: boolean;
+  showClearButton?: boolean;
+  showSearchLogo?: boolean;
 }
 
 export function SearchRow({
@@ -31,9 +35,14 @@ export function SearchRow({
   onFilterPress,
   showCoptic,
   onToggleCoptic,
+  showFilterButton = true,
+  showCopticKeyboard = true,
+  showClearButton = true,
+  showSearchLogo = true,
 }: SearchRowProps) {
   const colors = useThemeColors();
   const { t, isRTL } = useLang();
+  const { remoteSettings } = useAppConfig();
   const inputRef = useRef<TextInput>(null);
   const [isFocused, setIsFocused] = useState(false);
 
@@ -163,7 +172,7 @@ export function SearchRow({
         ]}
       >
         {/* ط£ظٹظ‚ظˆظ†ط© ط§ظ„ط¨ط­ط« */}
-        <TouchableOpacity
+        {showSearchLogo && <TouchableOpacity
           onPress={() => inputRef.current?.focus()}
           style={[styles.searchIconBtn, { backgroundColor: colors.chipBg }]}
           activeOpacity={0.65}
@@ -174,7 +183,7 @@ export function SearchRow({
             style={styles.searchLogo}
             resizeMode="contain"
           />
-        </TouchableOpacity>
+        </TouchableOpacity>}
 
         {/* ط­ظ‚ظ„ ط§ظ„ط¥ط¯ط®ط§ظ„ */}
         <TextInput
@@ -214,8 +223,10 @@ export function SearchRow({
         />
 
         {/* ط²ط± ط§ظ„ظ…ط³ط­ */}
-        {value.length > 0 && (
+        {showClearButton && value.length > 0 && (
           <TouchableOpacity
+            accessibilityRole="button"
+            accessibilityLabel={remoteSettings.labels.button_search_clear.trim() || (isRTL ? "مسح البحث" : "Clear search")}
             onPress={handleClear}
             style={[styles.clearBtn, { backgroundColor: colors.chipBg }]}
             activeOpacity={0.65}
@@ -226,11 +237,13 @@ export function SearchRow({
         )}
 
         {/* ظپط§طµظ„ */}
-        <View style={[styles.divider, { backgroundColor: colors.separator }]} />
+        {(showCopticKeyboard || showFilterButton) && <View style={[styles.divider, { backgroundColor: colors.separator }]} />}
 
         {/* ط²ط± ط§ظ„ظƒظٹط¨ظˆط±ط¯ ط§ظ„ظ‚ط¨ط·ظٹ */}
-        <Animated.View style={{ transform: [{ scale: copticScale }] }}>
+        {showCopticKeyboard && <Animated.View style={{ transform: [{ scale: copticScale }] }}>
           <TouchableOpacity
+            accessibilityRole="button"
+            accessibilityLabel={remoteSettings.labels.button_search_keyboard.trim() || (isRTL ? "لوحة المفاتيح القبطية" : "Coptic keyboard")}
             onPress={handleCoptic}
             style={[styles.innerBtn, { backgroundColor: showCoptic ? colors.primary + "18" : colors.chipBg }]}
             activeOpacity={0.75}
@@ -244,17 +257,19 @@ export function SearchRow({
               ⲀⲂ
             </Text>
           </TouchableOpacity>
-        </Animated.View>
+        </Animated.View>}
 
         {/* ط²ط± ط§ظ„ظپظ„طھط± */}
-        <TouchableOpacity
+        {showFilterButton && <TouchableOpacity
+          accessibilityRole="button"
+          accessibilityLabel={remoteSettings.labels.button_search_filter.trim() || (isRTL ? "تصفية البحث" : "Search filters")}
           onPress={onFilterPress}
           style={[styles.innerBtn, { backgroundColor: colors.chipBg }]}
           activeOpacity={0.75}
           hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
         >
           <Feather name="sliders" size={17} color={colors.textSecondary} />
-        </TouchableOpacity>
+        </TouchableOpacity>}
       </Animated.View>
     </View>
   );
@@ -333,3 +348,4 @@ const styles = StyleSheet.create({
   },
 });
 
+import { useAppConfig } from "@/contexts/AppConfigContext";

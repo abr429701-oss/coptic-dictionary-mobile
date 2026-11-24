@@ -25,6 +25,7 @@ import { Feather, Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useTheme } from "@/contexts/ThemeContext";
 import { useLanguage } from "@/contexts/LanguageContext";
+import { useAppConfig } from "@/contexts/AppConfigContext";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as Haptics from "expo-haptics";
 import * as Clipboard from "expo-clipboard";
@@ -36,6 +37,7 @@ import * as Sharing from 'expo-sharing';
 import * as MediaLibrary from 'expo-media-library';
 import QRCode from 'react-native-qrcode-svg';
 import * as Print from 'expo-print';
+import { File, Paths } from "expo-file-system";
 import { cacheDirectory, moveAsync, readAsStringAsync, writeAsStringAsync, EncodingType } from "expo-file-system/legacy";
 import pptxgen from "pptxgenjs";
 import { Document, Packer, Paragraph, TextRun, HeadingLevel, AlignmentType, Table, TableRow, TableCell, WidthType, BorderStyle, ImageRun } from "docx";
@@ -43,6 +45,7 @@ import qrcode from "qrcode-generator";
 import { strToU8, zipSync } from "fflate";
 import { useAppUpdate } from "@/hooks/useAppUpdate";
 import { getChapterCount, searchVersesFTS, getMultiLangVerses, normalizeText as dbNormalize } from "@/utils/bibleDB";
+import { getRemoteBibleBooks, type RemoteBibleBook } from "@/lib/bibleRemote";
 import { CustomKeyboard, type KeyboardLang } from './CustomKeyboard';
 
 const ALL_BIBLE_LANGS = ['ar', 'en', 'gr', 'he', 'cb', 'sy'];
@@ -119,19 +122,27 @@ const excelColumnName = (column: number): string => {
   return name;
 };
 
-const bytesToBase64 = (bytes: Uint8Array): string => {
-  let binary = "";
-  const chunkSize = 0x8000;
-  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
-    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
-  }
-  return btoa(binary);
-};
+const BASE64_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 const base64ToBytes = (base64: string): Uint8Array => {
-  const binary = atob(base64);
-  const bytes = new Uint8Array(binary.length);
-  for (let index = 0; index < binary.length; index++) bytes[index] = binary.charCodeAt(index);
+  const normalized = base64.replace(/\s/g, "").replace(/=+$/, "");
+  if (normalized.length % 4 === 1) throw new Error("Invalid Base64 data for Excel logo");
+
+  const bytes = new Uint8Array(Math.floor((normalized.length * 6) / 8));
+  let buffer = 0;
+  let bitsInBuffer = 0;
+  let outputIndex = 0;
+  for (const character of normalized) {
+    const value = BASE64_ALPHABET.indexOf(character);
+    if (value < 0) throw new Error("Invalid Base64 character in Excel logo data");
+    buffer = (buffer << 6) | value;
+    bitsInBuffer += 6;
+    if (bitsInBuffer >= 8) {
+      bitsInBuffer -= 8;
+      bytes[outputIndex++] = (buffer >> bitsInBuffer) & 0xff;
+      buffer &= (1 << bitsInBuffer) - 1;
+    }
+  }
   return bytes;
 };
 const waitForPosterRender = async (): Promise<void> => {
@@ -424,21 +435,55 @@ const VerseResultCard = React.memo(({ item, index, isDark, lang, searchQuery, on
 const getBookTitle = (book: any, lang: string) => {
   if (!book) return "";
   if (lang === 'ar') return book.titleAr;
-  if (lang === 'fr') return book.titleFr || book.id;
-  if (lang === 'de') return book.titleDe || book.id;
-  return book.id; // English or default
+  if (lang === 'fr') return book.titleFr || book.titleEn || book.id;
+  if (lang === 'de') return book.titleDe || book.titleEn || book.id;
+  return book.titleEn || book.id; // English or default
 };
 
 export function CopticBibleScreen() {
   const { t, language, isRTL, lang } = useLanguage();
+  const { remoteSettings, remoteSettingsReady } = useAppConfig();
+  const remoteControls = remoteSettings.controls;
+  const isBibleBookVisible = useCallback((book: { num: number; hidden?: boolean }) => !book.hidden && remoteSettings.visibility.bibleBooks[String(book.num)] !== false, [remoteSettings.visibility.bibleBooks]);
+  const allowedBibleLanguages = useMemo(() => ALL_BIBLE_LANGS.filter((code) => remoteSettings.visibility.bibleTranslations[code] !== false), [remoteSettings.visibility.bibleTranslations]);
   const { currentAppLink } = useAppUpdate();
   const insets = useSafeAreaInsets();
   const { isDark } = useTheme();
   const { width: viewportWidth } = useWindowDimensions();
+  const [remoteBookMetadata, setRemoteBookMetadata] = useState<RemoteBibleBook[]>([]);
+  const allBibleBooks = useMemo<any[]>(() => {
+    const merged = new Map<number, any>(BIBLE_BOOKS.map((book) => [book.num, { ...book, order: book.num }]));
+    for (const override of remoteBookMetadata) {
+      if (override.deleted) { merged.delete(override.id); continue; }
+      const local = merged.get(Number(override.id));
+      const fallback = local || { id: String(override.id), num: override.id, titleAr: "", titleEn: "", titleFr: "", titleDe: "", titleCoptic: "", testament: override.testament };
+      merged.set(Number(override.id), {
+        ...fallback,
+        id: local?.id ?? String(override.id), num: Number(override.id), order: Number(override.order || override.id),
+        titleAr: override.titleAr || fallback.titleAr, titleEn: override.titleEn || fallback.titleEn,
+        titleFr: override.titleFr || fallback.titleFr, titleDe: override.titleDe || fallback.titleDe,
+        titleCoptic: override.titleCoptic || fallback.titleCoptic, testament: override.testament === "custom" ? "new" : (override.testament || fallback.testament),
+        hidden: Boolean(override.hidden),
+      });
+    }
+    return Array.from(merged.values()).sort((a, b) => Number(a.order || a.num) - Number(b.order || b.num));
+  }, [remoteBookMetadata]);
+  useEffect(() => {
+    let cancelled = false;
+    const refresh = async () => { const books = await getRemoteBibleBooks(true); if (!cancelled) setRemoteBookMetadata(books); };
+    void refresh();
+    const timer = setInterval(() => void refresh(), 30_000);
+    return () => { cancelled = true; clearInterval(timer); };
+  }, []);
 
   const [activeTestament, setActiveTestament] = useState<'old' | 'new'>('new');
   const [isDeuteroVisible, setIsDeuteroVisible] = useState(false);
   const [showDeuteroNotice, setShowDeuteroNotice] = useState(false);
+  useEffect(() => {
+    if (isDeuteroVisible && !remoteControls.bible_deuterocanonical) setIsDeuteroVisible(false);
+    if (activeTestament === 'old' && !remoteControls.bible_old_testament && remoteControls.bible_new_testament) setActiveTestament('new');
+    else if (activeTestament === 'new' && !remoteControls.bible_new_testament && remoteControls.bible_old_testament) setActiveTestament('old');
+  }, [activeTestament, isDeuteroVisible, remoteControls.bible_deuterocanonical, remoteControls.bible_old_testament, remoteControls.bible_new_testament]);
   const [selectedBook, setSelectedBook] = useState<any | null>(null);
   const [selectedChapter, setSelectedChapter] = useState<any | null>(null);
   const [bookData, setBookData] = useState<any[]>([]);
@@ -447,7 +492,8 @@ export function CopticBibleScreen() {
   const [searchQuery, setSearchQuery] = useState('');
 
   // Translation visibility states
-  const [visibleTrans, setVisibleTrans] = useState<string[]>(['ar', 'en']);
+  const [selectedTrans, setVisibleTrans] = useState<string[]>(['ar', 'en']);
+  const visibleTrans = useMemo(() => selectedTrans.filter((code) => allowedBibleLanguages.includes(code)), [selectedTrans, allowedBibleLanguages]);
 
   const [showDiacritics, setShowDiacritics] = useState(true);
   const [tableView, setTableView] = useState(false);
@@ -464,6 +510,21 @@ export function CopticBibleScreen() {
   const [searchBookId, setSearchBookId] = useState<number | null>(null);
   const [showBookPicker, setShowBookPicker] = useState(false);
   const [isFromSearch, setIsFromSearch] = useState(false);
+  useEffect(() => {
+    if (selectedBook && !isBibleBookVisible(selectedBook)) {
+      setSelectedBook(null);
+      setSelectedChapter(null);
+      setBookData([]);
+      setIsFromSearch(false);
+    }
+    if (searchBookId !== null) {
+      const scopedBook = allBibleBooks.find((book) => book.num === searchBookId);
+      if (scopedBook && !isBibleBookVisible(scopedBook)) {
+        setSearchBookId(null);
+        setSearchScope('all');
+      }
+    }
+  }, [selectedBook, searchBookId, isBibleBookVisible]);
   const [showVersePicker, setShowVersePicker] = useState(false);
   const [currentVerse, setCurrentVerse] = useState(1);
   const [showCrossRefs, setShowCrossRefs] = useState(false);
@@ -490,7 +551,7 @@ export function CopticBibleScreen() {
     }, 3000);
   };
 
-  const displayedResults = useMemo(() => globalResults.slice(0, visibleResultsCount), [globalResults, visibleResultsCount]);
+  const displayedResults = useMemo(() => globalResults.filter((item: any) => { const book = allBibleBooks.find((entry) => entry.id === item.bookId); return Boolean(book && isBibleBookVisible(book)); }).slice(0, visibleResultsCount), [globalResults, visibleResultsCount, isBibleBookVisible]);
 
   const renderVerseResult = useCallback(({ item }: any) => (
     <VerseResultCard
@@ -499,8 +560,8 @@ export function CopticBibleScreen() {
       lang={lang}
       searchQuery={searchQuery}
       onPress={async (verseItem: any) => {
-        const book = BIBLE_BOOKS.find(b => b.id === verseItem.bookId);
-        if (book) {
+        const book = allBibleBooks.find(b => b.id === verseItem.bookId);
+        if (book && isBibleBookVisible(book)) {
           setSelectedBook(book);
           setSearchBookId(book.num);
           setIsLoading(true);
@@ -508,7 +569,7 @@ export function CopticBibleScreen() {
             const chapters = await getChapterCount(book.num);
             setBookData(chapters.map((c: { chapter: number }) => ({ num: c.chapter })));
             const combined = await getMultiLangVerses(book.num, verseItem.chapterNum, visibleTrans);
-            lastFetchKeyRef.current = `${book.id}-${verseItem.chapterNum}-${visibleTrans.sort().join(',')}`;
+            lastFetchKeyRef.current = `${book.id}-${verseItem.chapterNum}-${visibleTrans.slice().sort().join(',')}`;
             setSelectedChapter({ num: verseItem.chapterNum, combinedVerses: combined });
             setTargetVerse(Number(verseItem.verseNumber));
             setIsFromSearch(true);
@@ -520,7 +581,7 @@ export function CopticBibleScreen() {
         }
       }}
     />
-  ), [isDark, lang, searchQuery, visibleTrans]);
+  ), [isDark, lang, searchQuery, visibleTrans, isBibleBookVisible]);
 
   // --- Definitive Search Normalization ---
   const normalize = (text: string) => {
@@ -593,8 +654,11 @@ export function CopticBibleScreen() {
       // التحقق: هل هذه النتائج تابعة لآخر عملية بحث طلبها المستخدم؟
       if (currentSearchId !== searchIdRef.current) return;
 
-      const results = rows.map((r: any) => {
-        const bookMeta = BIBLE_BOOKS.find(b => b.num === r.book);
+      const results = rows.filter((r: any) => {
+        const bookMeta = allBibleBooks.find(b => b.num === r.book);
+        return Boolean(bookMeta && isBibleBookVisible(bookMeta));
+      }).map((r: any) => {
+        const bookMeta = allBibleBooks.find(b => b.num === r.book);
         return {
           primaryLang: r.langCode,
           matchedText: r.text,
@@ -612,7 +676,7 @@ export function CopticBibleScreen() {
     } finally {
       setIsSearchingVerses(false);
     }
-  }, [visibleTrans, searchScope, searchBookId]);
+  }, [visibleTrans, searchScope, searchBookId, isBibleBookVisible]);
 
   useEffect(() => {
     const q = inputText.trim();
@@ -759,7 +823,7 @@ export function CopticBibleScreen() {
   const navigateToVerse = (bookId: number, chapter: number, verse: number) => {
     triggerHaptic();
     setShowCrossRefs(false);
-    const book = BIBLE_BOOKS.find(b => b.num === bookId);
+    const book = allBibleBooks.find(b => b.num === bookId);
     if (book) {
       loadBook(book);
       // نحتاج لانتظار تحميل الكتاب ثم الأصحاح
@@ -773,6 +837,7 @@ export function CopticBibleScreen() {
   };
 
   const loadBook = async (book: any) => {
+    if (!book || !isBibleBookVisible(book)) return;
     setBookData([]); // مسح البيانات القديمة فوراً
     setIsLoading(true);
     triggerHaptic();
@@ -817,7 +882,7 @@ export function CopticBibleScreen() {
   // تحديث الفصل عند تغيير اللغات المفعلة أو تغيير السفر/الأصحاح (مع منع التكرار اللانهائي)
   useEffect(() => {
     if (selectedBook && selectedChapter) {
-      const fetchKey = `${selectedBook.id}-${selectedChapter.num}-${visibleTrans.sort().join(',')}`;
+      const fetchKey = `${selectedBook.id}-${selectedChapter.num}-${visibleTrans.slice().sort().join(',')}`;
       if (lastFetchKeyRef.current !== fetchKey) {
         lastFetchKeyRef.current = fetchKey;
         loadChapter(selectedChapter, false); // Do NOT reset search state when just changing translations
@@ -826,6 +891,17 @@ export function CopticBibleScreen() {
       lastFetchKeyRef.current = "";
     }
   }, [visibleTrans, selectedBook, selectedChapter]);
+
+  useEffect(() => {
+    if (!selectedBook || !selectedChapter) return;
+    let active = true;
+    const refreshOpenChapter = async () => {
+      const combined = await getMultiLangVerses(selectedBook.num, selectedChapter.num, visibleTrans);
+      if (active) setSelectedChapter((current: any) => current?.num === selectedChapter.num ? { ...current, combinedVerses: combined } : current);
+    };
+    const timer = setInterval(() => void refreshOpenChapter(), 30_000);
+    return () => { active = false; clearInterval(timer); };
+  }, [visibleTrans, selectedBook, selectedChapter?.num]);
 
   const copyVerse = async (verse: any) => {
     const bookTitle = getBookTitle(selectedBook, lang);
@@ -1049,8 +1125,8 @@ export function CopticBibleScreen() {
   };
 
   const filteredBooks = useMemo(() => {
-    return BIBLE_BOOKS.filter(b => b.testament === activeTestament);
-  }, [activeTestament]);
+    return allBibleBooks.filter(b => b.testament === activeTestament && isBibleBookVisible(b));
+  }, [activeTestament, isBibleBookVisible]);
 
   const exportChapterToExcel = async () => {
     if (!selectedChapter?.combinedVerses || !selectedBook) return;
@@ -1065,7 +1141,12 @@ export function CopticBibleScreen() {
         languageLabels[lk] = t.bible.keyboard[lk] || lk.toUpperCase();
       });
 
-      const logoBase64 = await getExportLogoBase64();
+      let logoBase64 = "";
+      try {
+        logoBase64 = await getExportLogoBase64();
+      } catch (logoError) {
+        console.warn("Excel export will continue without the optional logo:", logoError);
+      }
       const workbookBytes = createBibleXlsx(
         COPTIC_APP_NAME,
         getBookTitle(selectedBook, lang),
@@ -1076,13 +1157,12 @@ export function CopticBibleScreen() {
         lang,
         logoBase64,
       );
-      const base64 = bytesToBase64(workbookBytes);
       const safeBookName = String(selectedBook.id).replace(/[^a-z0-9]+/gi, "_");
       const excelName = `Bible_${safeBookName}_Chapter_${selectedChapter.num}.xlsx`;
-      const excelUri = cacheDirectory + excelName;
+      const excelFile = new File(Paths.cache, excelName);
 
-      await writeAsStringAsync(excelUri, base64, { encoding: EncodingType.Base64 });
-      await Sharing.shareAsync(excelUri, {
+      excelFile.write(workbookBytes);
+      await Sharing.shareAsync(excelFile.uri, {
         UTI: "org.openxmlformats.spreadsheetml.sheet",
         mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
       });
@@ -1146,12 +1226,12 @@ export function CopticBibleScreen() {
                     {t.bible.keyboard[visibleTrans[0]] || visibleTrans[0]}
                   </Text>
                 </View>
-                <TouchableOpacity 
+                {remoteControls.bible_cross_references && <TouchableOpacity
                   onPress={() => handleOpenCrossRefs(item, visibleTrans[0])} 
                   style={[styles.linkBtn, { backgroundColor: (LANG_COLORS[visibleTrans[0]] || '#555') + '20', borderColor: (LANG_COLORS[visibleTrans[0]] || '#555') + '40', borderWidth: 1 }]}
                 >
                   <Feather name="link" size={15} color={LANG_COLORS[visibleTrans[0]] || '#555'} />
-                </TouchableOpacity>
+                </TouchableOpacity>}
               </>
             )}
           </View>
@@ -1183,14 +1263,14 @@ export function CopticBibleScreen() {
           </View>
 
           {/* 3. الجانب الأيمن: أيقونات التحكم */}
-          <View style={{ flexDirection: 'row', gap: 12, justifyContent: 'flex-end' }}>
-            <TouchableOpacity onPress={() => shareVerseAsImage(item)} style={styles.copyBtn} activeOpacity={0.7}>
+          {remoteControls.bible_verse_actions && <View style={{ flexDirection: 'row', gap: 12, justifyContent: 'flex-end' }}>
+            <TouchableOpacity accessibilityRole="button" accessibilityLabel={remoteSettings.labels.button_bible_verse_download.trim() || (lang === 'ar' ? 'حفظ الآية كصورة' : 'Save verse as image')} onPress={() => shareVerseAsImage(item)} style={styles.copyBtn} activeOpacity={0.7}>
               <Feather name="download" size={16} color={isDark ? "#C8A951" : "#8B0000"} />
             </TouchableOpacity>
-            <TouchableOpacity onPress={() => copyVerse(item)} style={styles.copyBtn} activeOpacity={0.7}>
+            <TouchableOpacity accessibilityRole="button" accessibilityLabel={remoteSettings.labels.button_bible_verse_copy.trim() || (lang === 'ar' ? 'نسخ الآية' : 'Copy verse')} onPress={() => copyVerse(item)} style={styles.copyBtn} activeOpacity={0.7}>
               <Feather name="copy" size={16} color={isDark ? "#C8A951" : "#8B0000"} />
             </TouchableOpacity>
-          </View>
+          </View>}
         </View>
         <View style={styles.verseContent}>
           {visibleTrans.map((lk, idx) => {
@@ -1212,12 +1292,12 @@ export function CopticBibleScreen() {
                           {t.bible.keyboard[lk] || lk}
                         </Text>
                       </View>
-                      <TouchableOpacity 
+                      {remoteControls.bible_cross_references && <TouchableOpacity
                         onPress={() => handleOpenCrossRefs(item, lk)} 
                         style={[styles.linkBtn, { backgroundColor: (LANG_COLORS[lk] || '#555') + '20', borderColor: (LANG_COLORS[lk] || '#555') + '40', borderWidth: 1 }]}
                       >
                         <Feather name="link" size={15} color={LANG_COLORS[lk] || '#555'} />
-                      </TouchableOpacity>
+                      </TouchableOpacity>}
                     </View>
                   </>
                 )}
@@ -1320,24 +1400,24 @@ export function CopticBibleScreen() {
             </Text>
           </TouchableOpacity>
 
-          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, marginRight: 6 }}>
-            <TouchableOpacity accessibilityRole="button" accessibilityLabel={lang === 'ar' ? 'تصدير إلى Word' : 'Export to Word'} onPress={exportChapterToDOCX} style={[styles.backBtn, { width: 34 }]}>
+          {remoteControls.bible_export_controls && <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, marginRight: 6 }}>
+            <TouchableOpacity accessibilityRole="button" accessibilityLabel={remoteSettings.labels.button_bible_export_word.trim() || (lang === 'ar' ? 'تصدير إلى Word' : 'Export to Word')} onPress={exportChapterToDOCX} style={[styles.backBtn, { width: 34 }]}>
               <MaterialCommunityIcons name="file-word-box" size={23} color="#2B579A" />
             </TouchableOpacity>
-            <TouchableOpacity accessibilityRole="button" accessibilityLabel={lang === 'ar' ? 'تصدير إلى PowerPoint' : 'Export to PowerPoint'} onPress={exportChapterToPPTX} style={[styles.backBtn, { width: 34 }]}>
+            <TouchableOpacity accessibilityRole="button" accessibilityLabel={remoteSettings.labels.button_bible_export_pptx.trim() || (lang === 'ar' ? 'تصدير إلى PowerPoint' : 'Export to PowerPoint')} onPress={exportChapterToPPTX} style={[styles.backBtn, { width: 34 }]}>
               <MaterialCommunityIcons name="microsoft-powerpoint" size={22} color="#E06C3F" />
             </TouchableOpacity>
-            <TouchableOpacity accessibilityRole="button" accessibilityLabel={lang === 'ar' ? 'تصدير إلى PDF' : 'Export to PDF'} onPress={exportChapterToPDF} style={[styles.backBtn, { width: 34 }]}>
+            <TouchableOpacity accessibilityRole="button" accessibilityLabel={remoteSettings.labels.button_bible_export_pdf.trim() || (lang === 'ar' ? 'تصدير إلى PDF' : 'Export to PDF')} onPress={exportChapterToPDF} style={[styles.backBtn, { width: 34 }]}>
               <MaterialCommunityIcons name="file-pdf-box" size={23} color="#C8A951" />
             </TouchableOpacity>
-            <TouchableOpacity accessibilityRole="button" accessibilityLabel={lang === 'ar' ? 'تصدير الفصل إلى Excel' : lang === 'fr' ? 'Exporter le chapitre vers Excel' : lang === 'de' ? 'Kapitel nach Excel exportieren' : 'Export chapter to Excel'} onPress={exportChapterToExcel} style={[styles.backBtn, { width: 34 }]}>
+            <TouchableOpacity accessibilityRole="button" accessibilityLabel={remoteSettings.labels.button_bible_export_excel.trim() || (lang === 'ar' ? 'تصدير الفصل إلى Excel' : lang === 'fr' ? 'Exporter le chapitre vers Excel' : lang === 'de' ? 'Kapitel nach Excel exportieren' : 'Export chapter to Excel')} onPress={exportChapterToExcel} style={[styles.backBtn, { width: 34 }]}>
               <MaterialCommunityIcons name="file-excel-box" size={23} color="#217346" />
             </TouchableOpacity>
-          </View>
+          </View>}
         </View>
         {/* ── Controls Panel ── */}
         <View style={[styles.controlsBar, { backgroundColor: isDark ? "#1A1A1A" : "#FFF" }]}>
-          <View style={[styles.layoutModeRow, { flexDirection: isRTL ? 'row-reverse' : 'row' }]}>
+          {remoteControls.bible_layout_modes && <View style={[styles.layoutModeRow, { flexDirection: isRTL ? 'row-reverse' : 'row' }]}>
             <View style={[styles.layoutModeGroup, { flexDirection: isRTL ? 'row-reverse' : 'row' }]}>
               <TouchableOpacity
                 onPress={() => { setScrollLockVerse(currentVerse); setTableView(false); }}
@@ -1347,7 +1427,7 @@ export function CopticBibleScreen() {
               >
                 <Feather name="align-left" size={15} color={!tableView ? '#FFF' : (isDark ? '#AAA' : '#666')} />
                 <Text numberOfLines={1} style={[styles.layoutModeText, { color: !tableView ? '#FFF' : (isDark ? '#AAA' : '#666') }]}>
-                  {lang === 'ar' ? 'متتابع' : lang === 'fr' ? 'Vertical' : lang === 'de' ? 'Untereinander' : 'Stacked'}
+                  {remoteSettings.labels.button_bible_layout_stacked.trim() || (lang === 'ar' ? 'متتابع' : lang === 'fr' ? 'Vertical' : lang === 'de' ? 'Untereinander' : 'Stacked')}
                 </Text>
               </TouchableOpacity>
               <TouchableOpacity
@@ -1358,14 +1438,14 @@ export function CopticBibleScreen() {
               >
                 <Feather name="grid" size={15} color={tableView ? '#FFF' : (isDark ? '#AAA' : '#666')} />
                 <Text numberOfLines={1} style={[styles.layoutModeText, { color: tableView ? '#FFF' : (isDark ? '#AAA' : '#666') }]}>
-                  {lang === 'ar' ? 'جدولي' : lang === 'fr' ? 'Tableau' : lang === 'de' ? 'Tabelle' : 'Table'}
+                  {remoteSettings.labels.button_bible_layout_table.trim() || (lang === 'ar' ? 'جدولي' : lang === 'fr' ? 'Tableau' : lang === 'de' ? 'Tabelle' : 'Table')}
                 </Text>
               </TouchableOpacity>
             </View>
-          </View>
+          </View>}
           {/* Row 1: All language chips visible (no scroll) */}
-          <View style={styles.langChipsWrap}>
-            {ALL_BIBLE_LANGS.map(lk => {
+          {remoteControls.bible_translation_controls && <View style={styles.langChipsWrap}>
+            {allowedBibleLanguages.map(lk => {
               const active = visibleTrans.includes(lk);
               const isAvailable = true; // Always available per user request
               return (
@@ -1401,7 +1481,7 @@ export function CopticBibleScreen() {
                 </TouchableOpacity>
               );
             })}
-          </View>
+          </View>}
           {/* Row 2: Diacritics + Font Size */}
           {/* Row 2: Controls with Labels (Even Spacing) */}
           <View style={styles.controlsRow2}>
@@ -1758,8 +1838,8 @@ export function CopticBibleScreen() {
                       item={{
                         primaryLang: item.langCode,
                         matchedText: item.text,
-                        bookId: BIBLE_BOOKS.find(b => b.num === item.book)?.id || '',
-                        bookTitleAr: BIBLE_BOOKS.find(b => b.num === item.book)?.titleAr || '',
+                        bookId: allBibleBooks.find(b => b.num === item.book)?.id || '',
+                        bookTitleAr: allBibleBooks.find(b => b.num === item.book)?.titleAr || '',
                         chapterNum: item.chapter,
                         verseNumber: String(item.verse),
                       }}
@@ -1854,10 +1934,12 @@ export function CopticBibleScreen() {
     );
   }
 
+  if (!remoteSettingsReady) return null;
+
   return (
     <View style={[styles.container, { backgroundColor: isDark ? "#121212" : "#F8F8F8", paddingBottom: Math.max(insets.bottom, 16) }]}>
       <View style={{ paddingTop: 8 }}>
-        <View style={[styles.searchContainer, { marginBottom: 10 }]}>
+        {remoteControls.bible_search && <View style={[styles.searchContainer, { marginBottom: 10 }]}>
           <Feather name="search" size={18} color="#C8A951" />
           <TextInput
             style={[
@@ -1881,44 +1963,44 @@ export function CopticBibleScreen() {
               <Feather name="x" size={16} color="#888" />
             </TouchableOpacity>
           )}
-        </View>
+        </View>}
 
         {/* 🎯 Search Scope Selector */}
-        {kbVisible && (
+        {remoteControls.bible_search && kbVisible && (
           <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.scopeContainer}>
             <TouchableOpacity
               style={[styles.scopeChip, searchScope === 'all' && styles.activeScopeChip]}
               onPress={() => { triggerHaptic(); setSearchScope('all'); }}
             >
               <Text style={[styles.scopeText, searchScope === 'all' && styles.activeScopeText]}>
-                {lang === 'ar' ? 'الكل' : 'All'}
+                {remoteSettings.labels.button_bible_scope_all.trim() || (lang === 'ar' ? 'الكل' : 'All')}
               </Text>
             </TouchableOpacity>
-            {OLD_TESTAMENT_AVAILABLE && (
+            {OLD_TESTAMENT_AVAILABLE && remoteControls.bible_old_testament && (
               <TouchableOpacity
                 style={[styles.scopeChip, searchScope === 'old' && styles.activeScopeChip]}
                 onPress={() => { triggerHaptic(); setSearchScope('old'); }}
               >
                 <Text style={[styles.scopeText, searchScope === 'old' && styles.activeScopeText]}>
-                  {lang === 'ar' ? 'العهد القديم' : 'Old Testament'}
+                  {remoteSettings.labels.button_bible_scope_old.trim() || (lang === 'ar' ? 'العهد القديم' : 'Old Testament')}
                 </Text>
               </TouchableOpacity>
             )}
-            <TouchableOpacity
+            {remoteControls.bible_new_testament && <TouchableOpacity
               style={[styles.scopeChip, searchScope === 'new' && styles.activeScopeChip]}
               onPress={() => { triggerHaptic(); setSearchScope('new'); }}
             >
               <Text style={[styles.scopeText, searchScope === 'new' && styles.activeScopeText]}>
-                {lang === 'ar' ? 'العهد الجديد' : 'New Testament'}
+                  {remoteSettings.labels.button_bible_scope_new.trim() || (lang === 'ar' ? 'العهد الجديد' : 'New Testament')}
               </Text>
-            </TouchableOpacity>
-            {DEUTEROCANON_AVAILABLE && (
+            </TouchableOpacity>}
+            {DEUTEROCANON_AVAILABLE && remoteControls.bible_deuterocanonical && (
               <TouchableOpacity
                 style={[styles.scopeChip, searchScope === 'deutero' && styles.activeScopeChip]}
                 onPress={() => { triggerHaptic(); setSearchScope('deutero'); }}
               >
                 <Text style={[styles.scopeText, searchScope === 'deutero' && styles.activeScopeText]}>
-                  {lang === 'ar' ? 'الأسفار القانونية الثانية' : 'Deuterocanon'}
+                  {remoteSettings.labels.button_bible_scope_deuterocanonical.trim() || (lang === 'ar' ? 'الأسفار القانونية الثانية' : 'Deuterocanon')}
                 </Text>
               </TouchableOpacity>
             )}
@@ -1930,9 +2012,9 @@ export function CopticBibleScreen() {
               }}
             >
               <Text style={[styles.scopeText, searchScope === 'book' && styles.activeScopeText]}>
-                {(selectedBook || (searchBookId ? BIBLE_BOOKS.find(b => b.num === searchBookId) : null)) 
-                  ? `${t.bible.book_label}: ${getBookTitle((selectedBook || BIBLE_BOOKS.find(b => b.num === searchBookId)), lang)}` 
-                  : t.bible.select_book}
+                {(selectedBook || (searchBookId ? allBibleBooks.find(b => b.num === searchBookId) : null))
+                  ? `${remoteSettings.labels.button_bible_scope_book.trim() || t.bible.book_label}: ${getBookTitle((selectedBook || allBibleBooks.find(b => b.num === searchBookId)), lang)}`
+                  : remoteSettings.labels.button_bible_scope_book.trim() || t.bible.select_book}
               </Text>
             </TouchableOpacity>
           </ScrollView>
@@ -1940,7 +2022,7 @@ export function CopticBibleScreen() {
 
         {!kbVisible && searchQuery.length === 0 && (
           <View style={styles.tabsContainer}>
-            <TouchableOpacity
+            {remoteControls.bible_old_testament && <TouchableOpacity
               style={[styles.tabBtn, activeTestament === "old" && styles.activeTabBtn]}
               onPress={() => {
                 triggerHaptic();
@@ -1948,14 +2030,14 @@ export function CopticBibleScreen() {
                 setIsDeuteroVisible(false);
               }}
             >
-              <Text style={[styles.tabText, activeTestament === "old" && styles.activeTabText]}>{t.bible.old_testament}</Text>
-            </TouchableOpacity>
-            <TouchableOpacity
+              <Text style={[styles.tabText, activeTestament === "old" && styles.activeTabText]}>{remoteSettings.labels.button_bible_scope_old.trim() || t.bible.old_testament}</Text>
+            </TouchableOpacity>}
+            {remoteControls.bible_new_testament && <TouchableOpacity
               style={[styles.tabBtn, activeTestament === "new" && styles.activeTabBtn]}
               onPress={() => { triggerHaptic(); setActiveTestament("new"); setIsDeuteroVisible(false); }}
             >
-              <Text style={[styles.tabText, activeTestament === "new" && styles.activeTabText]}>{t.bible.new_testament}</Text>
-            </TouchableOpacity>
+              <Text style={[styles.tabText, activeTestament === "new" && styles.activeTabText]}>{remoteSettings.labels.button_bible_scope_new.trim() || t.bible.new_testament}</Text>
+            </TouchableOpacity>}
           </View>
         )}
       </View>
@@ -2032,16 +2114,16 @@ export function CopticBibleScreen() {
                   {t.bible.back_to_books}
                 </Text>
               </TouchableOpacity>
-              {BIBLE_BOOKS.filter(b => b.testament === 'deutero').map((item, index) => (
+              {allBibleBooks.filter(b => b.testament === 'deutero' && isBibleBookVisible(b)).map((item, index) => (
                 <BookItem key={item.id} item={item} index={index} isDark={isDark} lang={lang} isRTL={isRTL} onPress={loadBook} />
               ))}
             </>
           ) : (
             <>
-              {BIBLE_BOOKS.filter(b => b.testament === activeTestament).map((item, index) => (
+              {remoteControls[activeTestament === 'old' ? 'bible_old_testament' : 'bible_new_testament'] && allBibleBooks.filter(b => b.testament === activeTestament && isBibleBookVisible(b)).map((item, index) => (
                 <BookItem key={item.id} item={item} index={index} isDark={isDark} lang={lang} isRTL={isRTL} onPress={loadBook} />
               ))}
-              {activeTestament === 'old' && (
+              {activeTestament === 'old' && remoteControls.bible_deuterocanonical && (
                 <TouchableOpacity
                   style={styles.deuteroEntryBtn}
                   onPress={() => {
@@ -2172,8 +2254,8 @@ export function CopticBibleScreen() {
               </TouchableOpacity>
             </View>
             <FlatList
-              data={BIBLE_BOOKS.filter((book) => book.testament === 'old')}
-              keyExtractor={(item) => item.id}
+              data={allBibleBooks.filter((book) => isBibleBookVisible(book) && (book.testament !== 'deutero' || DEUTEROCANON_AVAILABLE))}
+              keyExtractor={(item) => String(item.id)}
               showsVerticalScrollIndicator={false}
               contentContainerStyle={{ paddingBottom: 20 }}
               renderItem={({ item }) => (

@@ -29,6 +29,10 @@ interface WordCardProps {
   wholeCopticWord?: boolean;
   showMeaningCount?: boolean;
   meaningCount?: number;
+  showAudio?: boolean;
+  showSecondaryMeaning?: boolean;
+  showMetadata?: boolean;
+  showResultIndex?: boolean;
   cachePlayedAudio?: (entry: DictionaryEntry) => Promise<void>;
   onPress: (entry: DictionaryEntry) => void;
 }
@@ -51,7 +55,7 @@ function getDisplayedMeaning(arabic: string, query: string): string {
   return matched || meanings[0];
 }
 
-export function WordCard({ entry, index, query, displayMeaning, forceLang, audioDownloaded = false, compactResult = false, wholeCopticWord = false, showMeaningCount = false, meaningCount: providedMeaningCount, cachePlayedAudio, onPress }: WordCardProps) {
+export function WordCard({ entry, index, query, displayMeaning, forceLang, audioDownloaded = false, compactResult = false, wholeCopticWord = false, showMeaningCount = false, meaningCount: providedMeaningCount, showAudio = true, showSecondaryMeaning = true, showMetadata = true, showResultIndex = true, cachePlayedAudio, onPress }: WordCardProps) {
   const { lang: appLang, isRTL: appIsRTL, t } = useLang();
 
   const lang = forceLang || appLang;
@@ -161,7 +165,7 @@ export function WordCard({ entry, index, query, displayMeaning, forceLang, audio
                   {primaryText}
                 </Text>
 
-                {!compactResult && secondaryText ? (
+                {!compactResult && showSecondaryMeaning && secondaryText ? (
                   <Text
                     style={[
                       copticFirst ? styles.arabicSecondary : styles.copticSecondary,
@@ -175,7 +179,7 @@ export function WordCard({ entry, index, query, displayMeaning, forceLang, audio
                   </Text>
                 ) : null}
 
-                {!compactResult && hasMeta && (
+                {!compactResult && showMetadata && hasMeta && (
                   <View style={[styles.chips]}>
                     {entry.wordType ? (
                       <View style={[styles.chip, {
@@ -202,7 +206,7 @@ export function WordCard({ entry, index, query, displayMeaning, forceLang, audio
               </View>
 
               <View style={[styles.chevronWrap, showMeaningCount && styles.chevronWrapWithCount]}>
-                {!compactResult && index !== undefined && (
+                {!compactResult && showResultIndex && index !== undefined && (
                   <View style={styles.indexBadge}>
                     <Text style={styles.indexText}>{String(index + 1).padStart(2, "0")}</Text>
                   </View>
@@ -227,7 +231,7 @@ export function WordCard({ entry, index, query, displayMeaning, forceLang, audio
               </View>
             </TouchableOpacity>
 
-            {!compactResult && entry.audioUrl ? (
+            {!compactResult && showAudio && entry.audioUrl ? (
               <View style={[
                 styles.audioRow,
                 { borderTopColor: colors.separator },

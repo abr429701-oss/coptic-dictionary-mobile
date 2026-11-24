@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { Platform, AppState, AppStateStatus } from 'react-native';
+import { Platform, AppState, AppStateStatus, Linking } from 'react-native';
 import * as Device from 'expo-device';
 import * as Notifications from 'expo-notifications';
 import Constants from 'expo-constants';
@@ -256,7 +256,7 @@ export function useExpoPushNotifications(splashDone: boolean = true) {
   const [expoPushToken, setExpoPushToken] = useState<string | undefined>();
 
   // إشعار داخلي (Modal) – نفس شكل إشعار Expo
-  const [notification, setNotification] = useState<{ body: string } | null>(null);
+  const [notification, setNotification] = useState<{ body: string; title?: string; imageUrl?: string; notificationId?: string } | null>(null);
 
   // لتجنب تشغيل الـ effect أكثر من مرة
   const initialized = useRef(false);
@@ -475,13 +475,13 @@ export function useExpoPushNotifications(splashDone: boolean = true) {
   /* ------------------------------------------------------------
    * 3️⃣ مساعدة لحفظ وتوليد الإشعارات وتجنب التكرار
    * ------------------------------------------------------------ */
-  const showAndCacheNotification = useCallback(async (bodyText: string) => {
+  const showAndCacheNotification = useCallback(async (bodyText: string, details?: { title?: string; imageUrl?: string; notificationId?: string }) => {
     if (!bodyText) return;
     const cleanText = String(bodyText).trim();
     if (!cleanText) return;
 
     // إنشاء نفس الـ ID الذي يستخدمه checkSheet
-    const msgId = `msg_${cleanText.length}_${cleanText.slice(0, 20)}`;
+    const msgId = details?.notificationId ? `push_${details.notificationId}` : `msg_${cleanText.length}_${cleanText.slice(0, 20)}`;
     const stored = await AsyncStorage.getItem(CACHE_KEY);
     const shownIds = stored ? JSON.parse(stored) : [];
 
@@ -491,7 +491,7 @@ export function useExpoPushNotifications(splashDone: boolean = true) {
         JSON.stringify([...shownIds, msgId].slice(-20))
       );
 
-      setNotification({ body: cleanText });
+      setNotification({ body: cleanText, ...details });
     }
   }, []);
 
@@ -509,7 +509,12 @@ export function useExpoPushNotifications(splashDone: boolean = true) {
 
       const bdy = notif?.request?.content?.body;
       if (bdy) {
-        showAndCacheNotification(bdy);
+        const imageUrl = typeof data?.imageUrl === 'string' && data.imageUrl.startsWith('https://') ? data.imageUrl : undefined;
+        showAndCacheNotification(bdy, imageUrl ? {
+          title: String(notif.request.content.title || ''),
+          imageUrl,
+          notificationId: String(data.notificationId || ''),
+        } : undefined);
       }
     });
 
@@ -517,6 +522,12 @@ export function useExpoPushNotifications(splashDone: boolean = true) {
     const responseSubscription = Notifications.addNotificationResponseReceivedListener((response) => {
       const data = response.notification.request.content.data;
       const bdy = response.notification.request.content.body;
+
+      // صفحة تفاصيل الإشعار تُفتح بواسطة جسر التنقل في layout؛ لا نعرض مودالًا فوقها.
+      if (data?.type === 'cloudflare_notification' && typeof data.imageUrl === 'string' && data.imageUrl.startsWith('https://')) {
+        setNotification(null);
+        return;
+      }
       
       // [تتبع جذري] تتبع الضغط على الإشعارات حسب النوع قبل أي فلترة
       if (data?.type === 'retention' || data?.type === 'learning_reminder' || data?.type === 'progress') {
@@ -530,6 +541,9 @@ export function useExpoPushNotifications(splashDone: boolean = true) {
         }
       } else if (data?.type === 'update') {
         logActivity("notif_click_update", undefined, `Version: ${data.version} | Body: ${bdy}`);
+        if (typeof data.updateUrl === 'string' && data.updateUrl) {
+          void Linking.openURL(data.updateUrl).catch((error) => console.warn('Could not open app update URL:', error));
+        }
       } else if (data?.type === 'daily_word') {
         // يتم التعامل معه في useDailyWord ولكن كاحتياط هنا أيضاً
         logActivity("notif_click_daily", undefined, `Clicked Daily Word ID: ${data.entryId}`);

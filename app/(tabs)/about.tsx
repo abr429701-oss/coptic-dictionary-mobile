@@ -31,6 +31,7 @@ import { useAppUpdate } from "@/hooks/useAppUpdate";
 import { useAdmin } from "@/contexts/AdminContext";
 import NetInfo from "@react-native-community/netinfo";
 import { verifyAdminPin } from "@/lib/adminAuth";
+import { useAppConfig } from "@/contexts/AppConfigContext";
 
 export default function AboutScreen({ compactHeader = false }: { compactHeader?: boolean }) {
   const colors = useThemeColors();
@@ -52,6 +53,7 @@ export default function AboutScreen({ compactHeader = false }: { compactHeader?:
   const { favorites } = useFavorites();
   const { history } = useHistory();
   const { currentAppLink } = useAppUpdate();
+  const { remoteSettings } = useAppConfig();
   const { isAdminMode, toggleAdminMode } = useAdmin();
   const router = useRouter();
   
@@ -69,6 +71,7 @@ export default function AboutScreen({ compactHeader = false }: { compactHeader?:
     });
     return () => unsubscribe();
   }, []);
+
 
   const checkQueue = async () => {
     const queue = await AsyncStorage.getItem("@admin_notif_queue");
@@ -216,12 +219,22 @@ export default function AboutScreen({ compactHeader = false }: { compactHeader?:
   ];
 
   const socialLinks = [
-    { icon: "facebook", label: t.social.facebook, url: "https://www.facebook.com/profile.php?id=61574169939115", color: "#1877F2" },
-    { icon: "message-circle", label: t.social.whatsapp, url: "https://wa.me/201207829388", color: "#25D366" },
-    { icon: "send", label: t.social.telegram, url: "https://telegram.me/Abraam55", color: "#0088cc" },
+    ...(remoteSettings.controls.link_social_facebook ? [{ icon: "facebook", label: t.social.facebook, url: remoteSettings.content.socialFacebookUrl, color: "#1877F2" }] : []),
+    ...(remoteSettings.controls.link_social_whatsapp ? [{ icon: "message-circle", label: t.social.whatsapp, url: remoteSettings.content.socialWhatsAppUrl, color: "#25D366" }] : []),
+    ...(remoteSettings.controls.link_social_telegram ? [{ icon: "send", label: t.social.telegram, url: remoteSettings.content.socialTelegramUrl, color: "#0088cc" }] : []),
   ];
 
-  const websiteUrl = "https://copticdictionry.neocities.org/";
+  const websiteUrl = remoteSettings.content.websiteUrl;
+  const desktopDownloadFallback = lang === "en" ? "Download the desktop app" : lang === "fr" ? "Télécharger l’application pour ordinateur" : lang === "de" ? "Desktop-App herunterladen" : "تحميل التطبيق للكمبيوتر";
+  const desktopDownloadLabel = remoteSettings.labels.about_desktop_download.trim() || desktopDownloadFallback;
+  const desktopDownloadUrl = remoteSettings.content.desktopDownloadUrl;
+  const usefulBots = remoteSettings.usefulBots;
+  const controls = remoteSettings.controls;
+  const showUsefulWhatsApp = usefulBots.whatsapp && controls.link_bot_whatsapp;
+  const showUsefulFacebook = usefulBots.facebook && controls.link_bot_facebook;
+  const showUsefulTelegramLearning = usefulBots.telegram && controls.link_bot_telegram_learning;
+  const showUsefulTelegramDictionary = usefulBots.telegram && controls.link_bot_telegram_dictionary;
+  const showAnyUsefulBot = showUsefulWhatsApp || showUsefulFacebook || showUsefulTelegramLearning || showUsefulTelegramDictionary;
   const rowStyle = { flexDirection: isRTL ? "row-reverse" : "row" } as const;
   const textAlign = isRTL ? "right" : "left";
   const renderSectionToggle = (id: string, title: string, icon: string) => {
@@ -250,7 +263,7 @@ export default function AboutScreen({ compactHeader = false }: { compactHeader?:
         contentContainerStyle={{ paddingBottom: bottomPad }}
         showsVerticalScrollIndicator={false}
       >
-        <View style={[styles.header, { backgroundColor: colors.headerBg, paddingTop: topPad + 40 }]}>
+        <View style={[styles.header, { backgroundColor: remoteSettings.content.brandColor || colors.headerBg, paddingTop: topPad + 40 }]}>
           <Image source={require("@/assets/images/icon.png")} style={styles.crossIcon} />
           <TouchableOpacity activeOpacity={1} onPress={handleSecretTap}>
             <Text style={styles.headerTitle}>{t.appName}</Text>
@@ -261,7 +274,7 @@ export default function AboutScreen({ compactHeader = false }: { compactHeader?:
           </View>
         </View>
 
-        <View style={styles.section}>
+        {controls.about_features && <View style={styles.section}>
           {renderSectionToggle("features", t.about.featuresTitle, "grid")}
           {expandedSection === "features" && (
             <View style={styles.accordionContent}>
@@ -278,9 +291,9 @@ export default function AboutScreen({ compactHeader = false }: { compactHeader?:
               ))}
             </View>
           )}
-        </View>
+        </View>}
 
-        <View style={styles.section}>
+        {controls.about_sources && <View style={styles.section}>
           {renderSectionToggle("sources", t.about.sourcesTitle, "book-open")}
           {expandedSection === "sources" && (
             <View style={styles.accordionContent}>
@@ -294,9 +307,9 @@ export default function AboutScreen({ compactHeader = false }: { compactHeader?:
               </View>
             </View>
           )}
-        </View>
+        </View>}
 
-        <View style={styles.section}>
+        {controls.about_social && socialLinks.length > 0 && <View style={styles.section}>
           {renderSectionToggle("social", t.about.socialTitle, "share-2")}
           {expandedSection === "social" && (
             <View style={styles.accordionContent}>
@@ -320,28 +333,34 @@ export default function AboutScreen({ compactHeader = false }: { compactHeader?:
               </View>
             </View>
           )}
-        </View>
+        </View>}
 
-        <View style={styles.section}>
+        {controls.about_bots && showAnyUsefulBot ? <View style={styles.section}>
           {renderSectionToggle("telegram", t.about.telegram.title, "send")}
           {expandedSection === "telegram" && (
             <View style={styles.accordionContent}>
               <View style={styles.botGrid}>
                 {[
-                  { label: t.about.telegram.learningBot, url: "https://t.me/Coptic2_bot" },
-                  { label: t.about.telegram.dictionaryBot, url: "https://t.me/Coptic_Dictionary_bot" },
+                  ...(showUsefulTelegramLearning ? [
+                    { key: "telegram-learning", label: t.about.telegram.learningBot, url: remoteSettings.content.usefulBotsTelegramLearningUrl, icon: "send", color: "#0088cc" },
+                  ] : []),
+                  ...(showUsefulTelegramDictionary ? [
+                    { key: "telegram-dictionary", label: t.about.telegram.dictionaryBot, url: remoteSettings.content.usefulBotsTelegramDictionaryUrl, icon: "send", color: "#0088cc" },
+                  ] : []),
+                  ...(showUsefulWhatsApp ? [{ key: "whatsapp", label: t.about.telegram.whatsappBot, url: remoteSettings.content.usefulBotsWhatsAppUrl, icon: "message-circle", color: "#25D366" }] : []),
+                  ...(showUsefulFacebook ? [{ key: "facebook", label: t.about.telegram.facebookBot, url: remoteSettings.content.usefulBotsFacebookUrl, icon: "facebook", color: "#1877F2" }] : []),
                 ].map((bot) => (
                   <TouchableOpacity
-                    key={bot.url}
+                    key={bot.key}
                     onPress={() => {
-                      logActivity("social_click", undefined, `TelegramBot: ${bot.label}`);
+                      logActivity("social_click", undefined, `UsefulBot: ${bot.label}`);
                       Linking.openURL(bot.url);
                     }}
                     style={[styles.botCard, rowStyle, { backgroundColor: colors.card, borderColor: colors.border }]}
                     activeOpacity={0.8}
                   >
-                    <View style={[styles.botIconBg, { backgroundColor: "#0088cc15" }]}>
-                      <Feather name="send" size={20} color="#0088cc" />
+                    <View style={[styles.botIconBg, { backgroundColor: `${bot.color}15` }]}>
+                      <Feather name={bot.icon as any} size={20} color={bot.color} />
                     </View>
                     <Text style={[styles.botLabel, { color: colors.text, textAlign }]}>{bot.label}</Text>
                     <Feather name={isRTL ? "chevron-left" : "chevron-right"} size={18} color={colors.textSecondary} />
@@ -350,16 +369,16 @@ export default function AboutScreen({ compactHeader = false }: { compactHeader?:
               </View>
             </View>
           )}
-        </View>
+        </View> : null}
 
-        <View style={styles.section}>
+        {controls.about_whatsapp_channel && controls.link_whatsapp_channel && <View style={styles.section}>
           {renderSectionToggle("whatsapp", t.about.whatsappChannelTitle, "message-circle")}
           {expandedSection === "whatsapp" && (
             <View style={styles.accordionContent}>
               <TouchableOpacity
                 onPress={() => {
                   logActivity("social_click", undefined, "WhatsAppChannel");
-                  Linking.openURL("https://whatsapp.com/channel/0029Vb6bGhpI7BeMzzWBKN2Q");
+                  Linking.openURL(remoteSettings.content.whatsappChannelUrl);
                 }}
                 style={[styles.channelCard, rowStyle, { backgroundColor: "rgba(37,211,102,0.1)", borderColor: "#25D366" }]}
                 activeOpacity={0.8}
@@ -368,16 +387,16 @@ export default function AboutScreen({ compactHeader = false }: { compactHeader?:
                   <Feather name="bell" size={24} color="#fff" />
                 </View>
                 <View style={styles.channelInfo}>
-                  <Text style={[styles.channelLabel, { color: colors.text, textAlign }]}>{t.whatsappChannel}</Text>
+                  <Text style={[styles.channelLabel, { color: colors.text, textAlign }]}>{remoteSettings.labels.button_about_whatsapp_channel.trim() || t.whatsappChannel}</Text>
                   <Text style={[styles.channelDesc, { color: colors.textSecondary, textAlign }]}>{t.about.whatsappChannelDesc}</Text>
                 </View>
                 <Feather name={isRTL ? "chevron-left" : "chevron-right"} size={20} color="#25D366" />
               </TouchableOpacity>
             </View>
           )}
-        </View>
+        </View>}
 
-        <View style={styles.section}>
+        {controls.about_suggestion && <View style={styles.section}>
           {renderSectionToggle("suggestion", t.about.suggestions.title, "message-square")}
           {expandedSection === "suggestion" && (
             <View style={styles.accordionContent}>
@@ -389,21 +408,21 @@ export default function AboutScreen({ compactHeader = false }: { compactHeader?:
                 <View style={styles.suggestionIconBg}>
                   <Feather name="edit-3" size={22} color="#8B0000" />
                 </View>
-                <Text style={[styles.suggestionLabel, { color: colors.text, textAlign }]}>{t.about.suggestions.openForm}</Text>
+                <Text style={[styles.suggestionLabel, { color: colors.text, textAlign }]}>{remoteSettings.labels.button_about_suggestion.trim() || t.about.suggestions.openForm}</Text>
                 <Feather name={isRTL ? "chevron-left" : "chevron-right"} size={18} color={colors.textSecondary} />
               </TouchableOpacity>
             </View>
           )}
-        </View>
+        </View>}
 
-        <View style={styles.section}>
+        {controls.about_website && <View style={styles.section}>
           {renderSectionToggle("website", t.about.websiteLabel, "globe")}
           {expandedSection === "website" && (
             <View style={styles.accordionContent}>
               <TouchableOpacity
                 onPress={() => {
                   if (websiteUrl) {
-                    logActivity("website_click", undefined, websiteUrl);
+                    logActivity("link_open_external", undefined, websiteUrl);
                     Linking.openURL(websiteUrl);
                   } else {
                     Alert.alert(t.about.websiteLabel, t.about.websiteComingSoon);
@@ -415,15 +434,41 @@ export default function AboutScreen({ compactHeader = false }: { compactHeader?:
                 <View style={[styles.botIconBg, { backgroundColor: "rgba(139,0,0,0.08)" }]}>
                   <Feather name="globe" size={20} color={colors.primary} />
                 </View>
-                <Text style={[styles.botLabel, { color: colors.text, textAlign }]}>{t.about.websiteOpenAction}</Text>
+                <Text style={[styles.botLabel, { color: colors.text, textAlign }]}>{remoteSettings.labels.button_about_website.trim() || t.about.websiteOpenAction}</Text>
                 <Feather name={isRTL ? "chevron-left" : "chevron-right"} size={18} color={colors.textSecondary} />
               </TouchableOpacity>
             </View>
           )}
-        </View>
+        </View>}
 
-        <View style={styles.section}>
-          {renderSectionToggle("share", t.about.shareLabel, "share-2")}
+        {controls.about_computer_download && <View style={styles.section}>
+          {renderSectionToggle("desktop-download", desktopDownloadLabel, "monitor")}
+          {expandedSection === "desktop-download" && (
+            <View style={styles.accordionContent}>
+              <TouchableOpacity
+                onPress={() => {
+                  if (/^https:\/\//i.test(desktopDownloadUrl.trim())) {
+                    logActivity("link_open_external", undefined, desktopDownloadUrl.trim());
+                    void Linking.openURL(desktopDownloadUrl.trim());
+                  } else {
+                    Alert.alert(desktopDownloadLabel, lang === "en" ? "The download link will be added soon." : lang === "fr" ? "Le lien de téléchargement sera ajouté prochainement." : lang === "de" ? "Der Download-Link wird später hinzugefügt." : "سيُضاف رابط التحميل لاحقًا من لوحة الإدارة.");
+                  }
+                }}
+                style={[styles.botCard, rowStyle, { backgroundColor: colors.card, borderColor: colors.border }]}
+                activeOpacity={0.8}
+              >
+                <View style={[styles.botIconBg, { backgroundColor: colors.tagBg }]}>
+                  <Feather name="monitor" size={20} color={colors.primary} />
+                </View>
+                <Text style={[styles.botLabel, { color: colors.text, textAlign }]}>{desktopDownloadLabel}</Text>
+                <Feather name={isRTL ? "chevron-left" : "chevron-right"} size={18} color={colors.textSecondary} />
+              </TouchableOpacity>
+            </View>
+          )}
+        </View>}
+
+        {controls.about_share && <View style={styles.section}>
+          {renderSectionToggle("share", remoteSettings.labels.button_about_share.trim() || t.about.shareLabel, "share-2")}
           {expandedSection === "share" && (
             <View style={styles.accordionContent}>
               <TouchableOpacity
@@ -434,12 +479,12 @@ export default function AboutScreen({ compactHeader = false }: { compactHeader?:
                 <View style={[styles.shareIconBg, { backgroundColor: colors.tagBg }]}>
                   <Feather name="share-2" size={24} color={colors.gold} />
                 </View>
-                <Text style={[styles.shareLabel, { color: colors.text, textAlign }]}>{t.about.shareAction}</Text>
+                <Text style={[styles.shareLabel, { color: colors.text, textAlign }]}>{remoteSettings.labels.button_about_share.trim() || t.about.shareAction}</Text>
                 <Feather name={isRTL ? "chevron-left" : "chevron-right"} size={18} color={colors.textSecondary} />
               </TouchableOpacity>
             </View>
           )}
-        </View>
+        </View>}
 
         <Modal visible={showModal} animationType="fade" transparent onRequestClose={() => setShowModal(false)}>
           <View style={styles.modalOverlay}>
