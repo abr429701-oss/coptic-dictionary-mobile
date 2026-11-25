@@ -5,9 +5,26 @@ mkdir -p capture
 SDK="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
 export PATH="$SDK/platform-tools:$SDK/emulator:$SDK/cmdline-tools/latest/bin:$PATH"
 
-yes | sdkmanager --licenses >/dev/null || true
-sdkmanager --install 'platforms;android-34' 'system-images;android-34;default;x86_64' 'emulator' 'platform-tools' >/dev/null
-echo no | avdmanager create avd --force -n test --package 'system-images;android-34;default;x86_64' --device 'pixel_6'
+export ANDROID_SDK_ROOT="$SDK"
+export ANDROID_AVD_HOME="$HOME/.android/avd"
+mkdir -p "$ANDROID_AVD_HOME"
+
+yes | sdkmanager --sdk_root="$SDK" --licenses >/dev/null || true
+sdkmanager --sdk_root="$SDK" --install 'platforms;android-34' 'system-images;android-34;default;x86_64' 'emulator' 'platform-tools' || { echo SDKMANAGER_INSTALL_FAILED; exit 1; }
+echo "--- installed packages ---"
+sdkmanager --sdk_root="$SDK" --list_installed | head -20
+
+create_avd() {
+  echo no | avdmanager create avd --force -n test --package 'system-images;android-34;default;x86_64' --device "$1"
+}
+create_avd 'pixel_6' || create_avd 'pixel' || echo "AVD create exit=$?"
+echo "--- avd dir after create ---"
+ls -la "$ANDROID_AVD_HOME" || true
+avdmanager list avd || true
+if [ ! -f "$ANDROID_AVD_HOME/test.ini" ]; then
+  echo "AVD_MISSING_AFTER_CREATE"
+  exit 1
+fi
 
 # Clean adb state, then start fresh
 adb kill-server || true
