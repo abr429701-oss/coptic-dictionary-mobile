@@ -118,7 +118,60 @@ adb shell "ls -la '$APKDIR/lib/arm64'" | head -5
 
 echo "--- am start -W (direct launch after lib fill, real result) ---"
 adb shell am start -W "$COMP" 2>&1 | tee capture/am-start.txt
-sleep 25
+sleep 20
+
+if adb shell pidof com.khmi.copticdictionary >/dev/null 2>&1 && [ -n "$(adb shell pidof com.khmi.copticdictionary | tr -d '\r')" ]; then
+  echo "APP ALIVE - dynamic navigation video capture"
+  uix() { adb shell uiautomator dump /sdcard/ui.xml >/dev/null 2>&1; adb shell cat /sdcard/ui.xml | tr -d '\r'; }
+  tapn() {
+    B=$(uix | python3 -c "
+import sys,re
+x=sys.stdin.read()
+pat=re.compile(r'<node[^>]*(?:text|content-desc)=\"[^\"]*'+sys.argv[1]+r'[^\"]*\"[^>]*bounds=\"\[(\d+),(\d+)\]\[(\d+),(\d+)\]\"',re.I)
+m=pat.search(x)
+print(f'{(int(m.group(1))+int(m.group(3)))//2} {(int(m.group(2))+int(m.group(4)))//2}' if m else '')" "$1")
+    if [ -n "$B" ]; then echo "tapn[$1] -> $B"; adb shell input tap $B; else echo "tapn[$1] fallback $2 $3"; adb shell input tap "$2" "$3"; fi
+    sleep "${4:-4}"
+  }
+  # Start ONE continuous recording; let screenrecord exit naturally (graceful moov finalize)
+  adb shell 'screenrecord --time-limit 150 /sdcard/demo1.mp4' &
+  REC=$!
+  sleep 3
+  # dismiss notification permission dialog if present (Don't allow, else Allow)
+  tapn "Don.t allow" 400 975 3
+  tapn "^Allow" 400 865 3
+  sleep 6                                  # home on camera
+  adb exec-out screencap -p > capture/01-home.png
+  tapn 'drawer|menu|☰|قائمة' 75 135 6      # hamburger (verified TOP LEFT px 75,135)
+  adb exec-out screencap -p > capture/02-drawer.png
+  sleep 3                                  # dwell on drawer
+  tapn 'الكتاب المقدس' 480 580 7           # Bible row (verified from v10 drawer pixels)
+  adb exec-out screencap -p > capture/03-bible.png
+  tapn 'التكوين|Genesis|ⲅⲉⲛⲉⲥⲓⲥ' 400 400 7  # first book
+  adb exec-out screencap -p > capture/04-book.png
+  adb shell input tap 200 300; sleep 6     # chapter 1 cell (screenshot verifies)
+  adb exec-out screencap -p > capture/05-chapter.png
+  adb shell input keyevent KEYCODE_BACK; sleep 3
+  adb shell input keyevent KEYCODE_BACK; sleep 3
+  tapn 'بحث|Search' 360 530 4              # search field (v10 home pixels)
+  adb shell input text "love"; sleep 7
+  adb exec-out screencap -p > capture/06-search.png
+  adb shell input tap 360 700; sleep 6     # first result
+  adb exec-out screencap -p > capture/07-details.png
+  adb shell input swipe 360 1100 360 500; sleep 4   # scroll details
+  adb shell input keyevent KEYCODE_BACK; sleep 3
+  tapn 'drawer|menu|☰|قائمة' 75 135 5      # drawer again
+  tapn 'تعلم' 480 460 7                    # Learn Coptic row
+  adb exec-out screencap -p > capture/08-learn.png
+  adb shell input keyevent KEYCODE_BACK; sleep 3
+  sleep 5
+  echo "waiting for screenrecord natural exit (finalize)"
+  wait $REC || true
+  adb pull /sdcard/demo1.mp4 capture/demo1.mp4 || true
+  ls -la capture/demo1.mp4 || true
+else
+  echo "APP NOT ALIVE after launch - no capture beats"
+fi
 if ! adb shell pidof com.khmi.copticdictionary; then
   echo "APP PROCESS NOT RUNNING AFTER DIRECT LAUNCH - evidence:"
   adb shell pidof com.khmi.copticdictionary || true
