@@ -78,26 +78,42 @@ if ! adb install -r app.apk 2>&1 | tee /tmp/install.log | grep -qi success; then
   exit 1
 fi
 
+echo "--- ABI / translation properties ---"
+{
+  adb shell getprop ro.product.cpu.abilist
+  adb shell getprop ro.product.cpu.abilist64
+  adb shell getprop ro.product.cpu.abilist32
+  adb shell getprop ro.dalvik.vm.native.bridge
+  adb shell dumpsys package com.khmi.copticdictionary | grep -E 'primaryCpuAbi|secondaryCpuAbi|versionName|installerPackageName' | head -6
+  echo "--- resolve launcher activity ---"
+  adb shell cmd package resolve-activity --brief -c android.intent.category.LAUNCHER com.khmi.copticdictionary
+} | tee capture/abi-info.txt
+
+adb logcat -c || true
+adb logcat -v threadtime > capture/logcat-live.txt &
+LOGPID=$!
+
 adb shell "screenrecord --time-limit 165 /sdcard/demo1.mp4" &
 REC=$!
 sleep 3
 
-adb shell monkey -p com.khmi.copticdictionary -c android.intent.category.LAUNCHER 1
+COMP=$(adb shell cmd package resolve-activity --brief -c android.intent.category.LAUNCHER com.khmi.copticdictionary 2>/dev/null | tail -1 | tr -d '\r')
+echo "resolved component: $COMP"
+echo "--- am start -W (direct launch, real result) ---"
+adb shell am start -W "$COMP" 2>&1 | tee capture/am-start.txt
 sleep 25
 if ! adb shell pidof com.khmi.copticdictionary; then
-  echo "APP PROCESS NOT RUNNING AFTER LAUNCH - collecting crash evidence"
+  echo "APP PROCESS NOT RUNNING AFTER DIRECT LAUNCH - evidence:"
   adb shell pidof com.khmi.copticdictionary || true
-  adb logcat -d -t 600 > capture/logcat-full.txt 2>&1 || true
-  adb logcat -d 2>/dev/null | grep -iE 'AndroidRuntime|FATAL|coptic|libc|abort|dlopen|UnsatisfiedLink' | tail -80 > capture/logcat-crash.txt || true
-  # retry launch once in case first-start timed out
-  adb shell monkey -p com.khmi.copticdictionary -c android.intent.category.LAUNCHER 1
-  sleep 20
-  if ! adb shell pidof com.khmi.copticdictionary; then
-    echo "APP DEAD AFTER RETRY - stopping capture, evidence saved"
-    kill $EMU 2>/dev/null || true
-    exit 1
-  fi
+  sleep 3
+  kill $LOGPID 2>/dev/null || true
+  grep -iE 'AndroidRuntime|FATAL|ActivityManager.*coptic|abort|dlopen|UnsatisfiedLink|native bridge|incompat|arm64' capture/logcat-live.txt | tail -60 > capture/logcat-crash.txt || true
+  adb exec-out screencap -p > capture/00-after-launch-attempt.png
+  echo "STOPPING - evidence saved (no blind retry)"
+  kill $EMU 2>/dev/null || true
+  exit 1
 fi
+kill $LOGPID 2>/dev/null || true
 adb exec-out screencap -p > capture/00-launch.png
 adb exec-out screencap -p > capture/01-home.png
 
