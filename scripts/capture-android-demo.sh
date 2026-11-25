@@ -10,12 +10,12 @@ export ANDROID_AVD_HOME="$HOME/.android/avd"
 mkdir -p "$ANDROID_AVD_HOME"
 
 yes | sdkmanager --sdk_root="$SDK" --licenses >/dev/null || true
-sdkmanager --sdk_root="$SDK" --install 'platforms;android-34' 'system-images;android-34;default;x86_64' 'emulator' 'platform-tools' || { echo SDKMANAGER_INSTALL_FAILED; exit 1; }
+sdkmanager --sdk_root="$SDK" --install 'platforms;android-34' 'system-images;android-34;google_apis;x86_64' 'emulator' 'platform-tools' || { echo SDKMANAGER_INSTALL_FAILED; exit 1; }
 echo "--- installed packages ---"
 sdkmanager --sdk_root="$SDK" --list_installed | head -20
 
 create_avd() {
-  echo no | avdmanager create avd --force -n test --package 'system-images;android-34;default;x86_64' --device "$1"
+  echo no | avdmanager create avd --force -n test --package 'system-images;android-34;google_apis;x86_64' --device "$1"
 }
 create_avd 'pixel_6' || create_avd 'pixel' || echo "AVD create exit=$?"
 echo "--- avd dir after create ---"
