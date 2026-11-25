@@ -99,7 +99,24 @@ sleep 3
 
 COMP=$(adb shell cmd package resolve-activity --brief -c android.intent.category.LAUNCHER com.khmi.copticdictionary 2>/dev/null | tail -1 | tr -d '\r')
 echo "resolved component: $COMP"
-echo "--- am start -W (direct launch, real result) ---"
+
+# Workaround for proven SoLoader failure: APK ships arm64 libs only in-apk (extractNativeLibs=false),
+# SoLoader's DirectApkSoSource probes lib/x86_64 under translation and misses. Fill the empty
+# extracted-lib dir /data/app/.../lib/arm64 with the APK's own arm64-v8a libs (real libs, unmodified app).
+adb root || true
+sleep 3
+adb wait-for-device
+APKDIR=$(adb shell 'ls -d /data/app/*/com.khmi.copticdictionary-* 2>/dev/null' | tr -d '\r' | head -1)
+echo "APKDIR=$APKDIR"
+mkdir -p /tmp/apklibs && unzip -o -q app.apk 'lib/arm64-v8a/*' -d /tmp/apklibs
+ls /tmp/apklibs/lib/arm64-v8a | head
+adb shell "mkdir -p '$APKDIR/lib/arm64'"
+adb push /tmp/apklibs/lib/arm64-v8a/. "$APKDIR/lib/arm64/"
+adb shell "chmod 755 '$APKDIR/lib/arm64'/*.so"
+adb shell "restorecon -R '$APKDIR/lib'" || true
+adb shell "ls -la '$APKDIR/lib/arm64'" | head -5
+
+echo "--- am start -W (direct launch after lib fill, real result) ---"
 adb shell am start -W "$COMP" 2>&1 | tee capture/am-start.txt
 sleep 25
 if ! adb shell pidof com.khmi.copticdictionary; then
