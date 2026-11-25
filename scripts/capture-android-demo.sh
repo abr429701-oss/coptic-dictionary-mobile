@@ -30,21 +30,37 @@ fi
 adb kill-server || true
 adb start-server
 adb devices -l
+echo "--- accel check ---"
+emulator -accel-check || true
 
-# Launch emulator headless with software GL
-emulator -avd test -no-window -no-audio -no-snapshot -no-boot-anim -no-metrics -gpu swiftshader_indirect -memory 4096 &
-EMU=$!
-sleep 5
-adb start-server || true
+launch_emu() {
+  emulator -avd test -no-window -no-audio -no-snapshot -no-boot-anim -no-metrics -gpu swiftshader_indirect -memory 4096 $1 &
+  EMU=$!
+}
 
-# Own boot wait (max 420s)
+wait_boot() {
+  adb wait-for-device
+  for i in $(seq 1 84); do
+    ST=$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')
+    if [ "$ST" = "1" ]; then return 0; fi
+    if ! kill -0 $EMU 2>/dev/null; then echo "EMULATOR PROCESS DIED"; return 1; fi
+    sleep 5
+  done
+  return 1
+}
+
 BOOTED=""
-for i in $(seq 1 84); do
-  ST=$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')
-  if [ "$ST" = "1" ]; then BOOTED=1; break; fi
-  if ! kill -0 $EMU 2>/dev/null; then echo "EMULATOR PROCESS DIED"; break; fi
-  sleep 5
-done
+launch_emu "-accel on"
+if wait_boot; then BOOTED=1; fi
+if [ -z "$BOOTED" ]; then
+  echo "KVM attempt failed, retrying software accel"
+  kill $EMU 2>/dev/null || true
+  sleep 3
+  adb kill-server || true
+  adb start-server
+  launch_emu "-accel off"
+  if wait_boot; then BOOTED=1; fi
+fi
 echo "booted=$BOOTED"
 if [ -z "$BOOTED" ]; then
   adb devices -l
@@ -57,7 +73,10 @@ adb shell settings put global transition_animation_scale 0
 adb shell settings put global animator_duration_scale 0
 adb shell wm size
 
-adb install -r app.apk
+if ! adb install -r app.apk 2>&1 | tee /tmp/install.log | grep -qi success; then
+  echo "APK INSTALL FAILED"
+  exit 1
+fi
 
 adb shell "screenrecord --time-limit 165 /sdcard/demo1.mp4" &
 REC=$!
@@ -65,6 +84,8 @@ sleep 3
 
 adb shell monkey -p com.khmi.copticdictionary -c android.intent.category.LAUNCHER 1
 sleep 25
+adb shell pidof com.khmi.copticdictionary || echo "APP PROCESS NOT RUNNING AFTER LAUNCH"
+adb exec-out screencap -p > capture/00-launch.png
 adb exec-out screencap -p > capture/01-home.png
 
 adb shell input tap 540 300
