@@ -15,27 +15,16 @@ jobs:
           curl -fSL --retry 3 -o app.apk "https://github.com/abr429701-oss/coptic-dictionary-mobile/releases/download/v1.3.1/Coptic.Dictionary.1.3.1.apk"
           ls -la app.apk
 
-      - name: Enable KVM
+      - name: Enable KVM and emulator runtime deps
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
-
-      - name: Install emulator runtime library (libpulse)
-        run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq libpulse0
 
-      - name: Boot emulator and capture demo
-        uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
-        with:
-          api-level: 34
-          target: default
-          arch: x86_64
-          profile: pixel_6
-          emulator-options: -no-window -no-snapshot-save -noaudio -no-boot-anim
-          disable-animations: true
-          script: bash scripts/capture-android-demo.sh
+      - name: Boot emulator and capture demo (self-managed)
+        run: bash scripts/capture-android-demo.sh
 
       - name: Upload capture artifacts
         if: always()
