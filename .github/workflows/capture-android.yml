@@ -10,6 +10,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 35
     steps:
+      - name: Checkout repo (for capture script)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
       - name: Download release APK v1.3.1
         run: |
           curl -fSL --retry 3 -o app.apk "https://github.com/abr429701-oss/coptic-dictionary-mobile/releases/download/v1.3.1/Coptic.Dictionary.1.3.1.apk"
