@@ -21,6 +21,11 @@ jobs:
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
 
+      - name: Install emulator runtime library (libpulse)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libpulse0
+
       - name: Boot emulator and capture demo
         uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
         with:
