@@ -33,7 +33,7 @@ jobs:
           target: default
           arch: x86_64
           profile: pixel_6
-          emulator-options: -no-snapshot-save -noaudio -no-boot-anim
+          emulator-options: -no-window -no-snapshot-save -noaudio -no-boot-anim
           disable-animations: true
           script: bash scripts/capture-android-demo.sh
 
