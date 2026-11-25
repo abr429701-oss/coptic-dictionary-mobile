@@ -84,7 +84,20 @@ sleep 3
 
 adb shell monkey -p com.khmi.copticdictionary -c android.intent.category.LAUNCHER 1
 sleep 25
-adb shell pidof com.khmi.copticdictionary || echo "APP PROCESS NOT RUNNING AFTER LAUNCH"
+if ! adb shell pidof com.khmi.copticdictionary; then
+  echo "APP PROCESS NOT RUNNING AFTER LAUNCH - collecting crash evidence"
+  adb shell pidof com.khmi.copticdictionary || true
+  adb logcat -d -t 600 > capture/logcat-full.txt 2>&1 || true
+  adb logcat -d 2>/dev/null | grep -iE 'AndroidRuntime|FATAL|coptic|libc|abort|dlopen|UnsatisfiedLink' | tail -80 > capture/logcat-crash.txt || true
+  # retry launch once in case first-start timed out
+  adb shell monkey -p com.khmi.copticdictionary -c android.intent.category.LAUNCHER 1
+  sleep 20
+  if ! adb shell pidof com.khmi.copticdictionary; then
+    echo "APP DEAD AFTER RETRY - stopping capture, evidence saved"
+    kill $EMU 2>/dev/null || true
+    exit 1
+  fi
+fi
 adb exec-out screencap -p > capture/00-launch.png
 adb exec-out screencap -p > capture/01-home.png
 
